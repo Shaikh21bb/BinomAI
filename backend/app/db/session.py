@@ -2,13 +2,22 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy.pool import NullPool
 from app.core.config import settings
 
+# Supabase pooler (PgBouncer) disallows prepared statements and requires TLS;
+# statement_cache_size=0 keeps asyncpg working there.
+_db_connect_args = (
+    {"ssl": "require", "statement_cache_size": 0}
+    if settings.DATABASE_SSL
+    else {}
+)
+
 # Create async engine for PostgreSQL
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG,
     pool_pre_ping=True,
     pool_size=10,
-    max_overflow=20
+    max_overflow=20,
+    connect_args=_db_connect_args,
 )
 
 # Create session factory
@@ -26,6 +35,7 @@ task_engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
     poolclass=NullPool,
+    connect_args=_db_connect_args,
 )
 
 async_task_session_factory = async_sessionmaker(

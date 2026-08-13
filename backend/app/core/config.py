@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     SUPABASE_ANON_KEY: str
     SUPABASE_SERVICE_KEY: str
     DATABASE_URL: str
+    DATABASE_SSL: bool = False
 
     # Auth Settings
     SUPABASE_JWT_SECRET: str
