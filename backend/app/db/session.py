@@ -2,14 +2,18 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy.pool import NullPool
 from app.core.config import settings
 
-# Supabase pooler (PgBouncer) disallows prepared statements and requires TLS;
-# disable statement caching on both asyncpg and the SQLAlchemy asyncpg dialect.
+# Supabase session pooler (port 5432) pins each client connection to a server
+# connection, so asyncpg prepared statements are safe there (unlike the
+# transaction pooler). It only requires TLS.
 _db_connect_args = (
-    {
-        "ssl": "require",
-        "statement_cache_size": 0,
-        "prepared_statement_cache_size": 0,
-    }
+    {"ssl": "require"}
+    if settings.DATABASE_SSL
+    else {}
+)
+
+# Session pooler caps at 10 client connections on the free plan.
+_db_pool_kwargs = (
+    {"pool_size": 5, "max_overflow": 5}
     if settings.DATABASE_SSL
     else {}
 )
@@ -19,9 +23,8 @@ engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG,
     pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
     connect_args=_db_connect_args,
+    **_db_pool_kwargs,
 )
 
 # Create session factory
