@@ -11,55 +11,18 @@ services:
     envVars:
       - key: APP_ENV
         value: production
-      - key: CORS_ORIGINS
-        value: https://<your-app>.vercel.app,http://localhost:3000
+      - key: DATABASE_SSL
+        value: "true"
+      - key: REDIS_URL
+        value: redis://localhost:6379/1
+      - key: CELERY_BROKER_URL
+        value: redis://localhost:6379/0
+      - key: CELERY_RESULT_BACKEND
+        value: redis://localhost:6379/0
       - key: GOTENBERG_URL
-        fromService:
-          type: web
-          name: binom-gotenberg
-          property: hostPort
-          envKey: GOTENBERG_INTERNAL_URL
-      - key: REDIS_URL
-        fromService:
-          type: redis
-          name: binom-redis
-          property: connectionString
-      - key: DATABASE_URL
-        sync: false
-      - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_ANON_KEY
-        sync: false
-      - key: SUPABASE_SERVICE_KEY
-        sync: false
-      - key: SUPABASE_JWT_SECRET
-        sync: false
-      - key: GOOGLE_AI_API_KEY
-        sync: false
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: PRIMARY_LLM_MODEL
-        sync: false
-      - key: FALLBACK_LLM_MODEL
-        sync: false
-
-  - type: worker
-    name: binom-worker
-    runtime: docker
-    repo: https://github.com/Shaikh21bb/BinomAI
-    branch: main
-    dockerfilePath: backend/Dockerfile.prod
-    dockerContext: ./backend
-    plan: free
-    startCommand: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2
-    envVars:
-      - key: APP_ENV
-        value: production
-      - key: REDIS_URL
-        fromService:
-          type: redis
-          name: binom-redis
-          property: connectionString
+        value: http://binom-gotenberg:3000
+      - key: CORS_ORIGINS
+        value: https://binom-ai-vprod.vercel.app,http://localhost:3000
       - key: DATABASE_URL
         sync: false
       - key: SUPABASE_URL
@@ -81,16 +44,13 @@ services:
 
   - type: web
     name: binom-gotenberg
-    runtime: image
-    image:
-      url: gotenberg/gotenberg:8
+    runtime: docker
+    repo: https://github.com/Shaikh21bb/BinomAI
+    branch: main
+    dockerfilePath: backend/Dockerfile.gotenberg
+    dockerContext: ./backend
     plan: free
+    healthCheckPath: /health
     envVars:
       - key: PORT
         value: "3000"
-    healthCheckPath: /health
-
-  - type: redis
-    name: binom-redis
-    plan: free
-    maxmemoryPolicy: noeviction
