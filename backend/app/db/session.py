@@ -1,12 +1,25 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.pool import NullPool
+import itertools
 from app.core.config import settings
 
-# Supabase session pooler (port 5432) pins each client connection to a server
-# connection, so asyncpg prepared statements are safe there (unlike the
-# transaction pooler). It only requires TLS.
+# PgBouncer (Supabase pooler) reuses server connections across clients and
+# keeps prepared statements alive, so asyncpg's auto-generated statement
+# names ("__asyncpg_stmt_N__") collide with leftovers. Generating a unique
+# name per statement makes collisions impossible; the dialect statement
+# cache is disabled accordingly.
+_statement_names = itertools.count()
+
+def _unique_statement_name() -> str:
+    return f"_binom_{next(_statement_names)}"
+
+# Supabase pooler requires TLS.
 _db_connect_args = (
-    {"ssl": "require"}
+    {
+        "ssl": "require",
+        "prepared_statement_cache_size": 0,
+        "prepared_statement_name_func": _unique_statement_name,
+    }
     if settings.DATABASE_SSL
     else {}
 )
