@@ -3,9 +3,13 @@ from sqlalchemy.pool import NullPool
 from app.core.config import settings
 
 # Supabase pooler (PgBouncer) disallows prepared statements and requires TLS;
-# statement_cache_size=0 keeps asyncpg working there.
+# disable statement caching on both asyncpg and the SQLAlchemy asyncpg dialect.
 _db_connect_args = (
-    {"ssl": "require", "statement_cache_size": 0}
+    {
+        "ssl": "require",
+        "statement_cache_size": 0,
+        "prepared_statement_cache_size": 0,
+    }
     if settings.DATABASE_SSL
     else {}
 )
