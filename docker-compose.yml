@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: binom_backend
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=development
+    env_file:
+      - .env
+    depends_on:
+      - redis
+      - gotenberg
+      - postgres
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  celery_worker:
+    build:
+      context: ./backend
+    container_name: binom_celery_worker
+    volumes:
+      - ./backend:/app
+    env_file:
+      - .env
+    depends_on:
+      - redis
+      - backend
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2
+
+  redis:
+    image: redis:7-alpine
+    container_name: binom_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    container_name: binom_gotenberg
+    ports:
+      - "3001:3000"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: binom_postgres
+    environment:
+      POSTGRES_USER: binom
+      POSTGRES_PASSWORD: binom
+      POSTGRES_DB: binom
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U binom -d binom"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  redis_data:
+  postgres_data:

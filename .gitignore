@@ -1,0 +1,45 @@
+# Prerequisites
+*.pyc
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Next.js
+.next/
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp.*
+
+# Environment
+.env
+.env.local
+.venv
+venv/
+ENV/
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker
+docker-compose.override.yml
+
+# Testing & Coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Logs
+logs/
+*.log
+
+# Supabase
+supabase/.temp/
