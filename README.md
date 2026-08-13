@@ -238,3 +238,43 @@ Frontend зафиксирован. Вся архитектурная работ�
 *Powered by Gemini · OpenAI · Next.js · FastAPI · Supabase*
 
 </div>
+## Деплой (Production)
+
+### Backend — Render (blueprint)
+
+1. На [render.com](https://render.com) нажмите **New → Blueprint** и укажите репозиторий `Shaikh21bb/BinomAI`.
+2. Render автоматически создаст 4 сервиса: `binom-backend` (FastAPI), `binom-worker` (Celery), `binom-gotenberg`, `binom-redis`.
+3. Заполните переменные окружения со значением `sync: false` (во вкладке **Environment** каждого сервиса):
+
+| Переменная | Значение |
+|---|---|
+| `DATABASE_URL` | `postgresql+asyncpg://...` от Supabase Postgres |
+| `SUPABASE_URL` | `https://xxxx.supabase.co` |
+| `SUPABASE_ANON_KEY` | anon-ключ |
+| `SUPABASE_SERVICE_KEY` | service_role-ключ |
+| `SUPABASE_JWT_SECRET` | секрет JWT |
+| `GOOGLE_AI_API_KEY` | ключ Gemini |
+| `OPENAI_API_KEY` | ключ OpenAI |
+| `PRIMARY_LLM_MODEL` / `FALLBACK_LLM_MODEL` | модели |
+
+4. В `CORS_ORIGINS` замените `https://<your-app>.vercel.app` на реальный домен Vercel.
+5. Supabase-миграции из `supabase/migrations/` выполните в SQL Editor (если ещё не выполнялись).
+
+> Бесплатный тариф Render «засыпает» сервисы после 15 минут простоя — первый запрос будет медленным.
+
+### Frontend — Vercel
+
+В настройках проекта Vercel задайте:
+
+| Переменная | Значение |
+|---|---|
+| `NEXT_PUBLIC_API_URL` | `https://binom-backend.onrender.com/api/v1` |
+
+(замените домен на имя вашего backend-сервиса Render)
+
+### Альтернатива: Railway
+
+- **Backend**: подключите репозиторий → сервис из `backend/Dockerfile.prod`, команда `uvicorn app.main:app --host 0.0.0.0 --port 8000`.
+- **Worker**: тот же образ, команда `celery -A app.tasks.celery_app worker --loglevel=info`.
+- **Redis** добавьте из шаблона Railway, **Gotenberg** — тоже из шаблона.
+- Затем задайте те же переменные окружения и `NEXT_PUBLIC_API_URL` на Vercel.

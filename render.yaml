@@ -1,0 +1,96 @@
+services:
+  - type: web
+    name: binom-backend
+    runtime: docker
+    repo: https://github.com/Shaikh21bb/BinomAI
+    branch: main
+    dockerfilePath: backend/Dockerfile.prod
+    dockerContext: ./backend
+    plan: free
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: CORS_ORIGINS
+        value: https://<your-app>.vercel.app,http://localhost:3000
+      - key: GOTENBERG_URL
+        fromService:
+          type: web
+          name: binom-gotenberg
+          property: hostPort
+          envKey: GOTENBERG_INTERNAL_URL
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: binom-redis
+          property: connectionString
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: GOOGLE_AI_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PRIMARY_LLM_MODEL
+        sync: false
+      - key: FALLBACK_LLM_MODEL
+        sync: false
+
+  - type: worker
+    name: binom-worker
+    runtime: docker
+    repo: https://github.com/Shaikh21bb/BinomAI
+    branch: main
+    dockerfilePath: backend/Dockerfile.prod
+    dockerContext: ./backend
+    plan: free
+    startCommand: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: binom-redis
+          property: connectionString
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: GOOGLE_AI_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PRIMARY_LLM_MODEL
+        sync: false
+      - key: FALLBACK_LLM_MODEL
+        sync: false
+
+  - type: web
+    name: binom-gotenberg
+    runtime: image
+    image:
+      url: gotenberg/gotenberg:8
+    plan: free
+    envVars:
+      - key: PORT
+        value: "3000"
+    healthCheckPath: /health
+
+  - type: redis
+    name: binom-redis
+    plan: free
+    maxmemoryPolicy: noeviction
