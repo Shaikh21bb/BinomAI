@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,12 +11,51 @@ from app.db.models.user import User
 from app.db.models.tender_lot import TenderLot
 from app.schemas.tender_lot import TenderLotCreate, TenderLotOut, TenderLotListResponse
 from app.services.tender_monitor import fetch_lot_page, TenderParseError
+from app.services.notifications import notify_company
 from app.core.config import settings
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
 
 REFRESH_INTERVAL = timedelta(hours=6)
+
+
+async def _maybe_notify_deadline(db: AsyncSession, lot: TenderLot) -> None:
+    """Notify once per deadline threshold (3d / 1d / passed)."""
+    if not lot.deadline_at:
+        return
+    now = datetime.now(timezone.utc)
+    if lot.deadline_at.tzinfo is None:
+        deadline = lot.deadline_at.replace(tzinfo=timezone.utc)
+    else:
+        deadline = lot.deadline_at
+    days_left = (deadline - now).total_seconds() / 86400.0
+    label = lot.lot_number or "Лот"
+
+    if days_left <= 0 and lot.deadline_warn_level < 3:
+        await notify_company(
+            db, lot.company_id, "tender_deadline",
+            f"Дедлайн лота {label} прошёл",
+            f"Приём заявок по лоту {label} завершён.",
+            "/tenders",
+        )
+        lot.deadline_warn_level = 3
+    elif days_left <= 1 and lot.deadline_warn_level < 2:
+        await notify_company(
+            db, lot.company_id, "tender_deadline",
+            f"Дедлайн лота {label} — меньше 1 дня",
+            f"До окончания приёма заявок по лоту {label} осталось менее суток.",
+            "/tenders",
+        )
+        lot.deadline_warn_level = 2
+    elif days_left <= 3 and lot.deadline_warn_level < 1:
+        await notify_company(
+            db, lot.company_id, "tender_deadline",
+            f"Дедлайн лота {label} — 3 дня",
+            f"До окончания приёма заявок по лоту {label} осталось 3 дня.",
+            "/tenders",
+        )
+        lot.deadline_warn_level = 1
 
 
 async def _refresh_lot(db: AsyncSession, lot: TenderLot, save: bool = True) -> None:
@@ -29,6 +68,12 @@ async def _refresh_lot(db: AsyncSession, lot: TenderLot, save: bool = True) -> N
             lot.prev_status = lot.status
             lot.status = new_status
             lot.status_changed_at = datetime.utcnow()
+            await notify_company(
+                db, lot.company_id, "tender_status",
+                f"Статус лота {lot.lot_number or 'без номера'} изменился",
+                f"Новый статус: {new_status}",
+                "/tenders",
+            )
         lot.lot_number = str(data.get("lot_number") or "").strip() or lot.lot_number
         lot.name = str(data.get("name") or "").strip() or lot.name
         lot.description = str(data.get("description") or "").strip() or lot.description
@@ -37,6 +82,7 @@ async def _refresh_lot(db: AsyncSession, lot: TenderLot, save: bool = True) -> N
         lot.amount = data.get("amount") or lot.amount
         lot.start_date = data.get("start_date") or lot.start_date
         lot.deadline_at = data.get("deadline_at") or lot.deadline_at
+        await _maybe_notify_deadline(db, lot)
         lot.last_error = None
         lot.next_check_at = datetime.utcnow() + REFRESH_INTERVAL
     except TenderParseError as e:

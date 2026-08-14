@@ -28,6 +28,8 @@ from app.schemas.company import CompanyUpdate, CompanyResponse
 from app.schemas.team import MemberResponse, MemberRoleUpdate
 from app.schemas.admin import InviteCreate, InviteResponse
 from app.db.models.invite import Invite
+from app.db.models.notification import Notification
+from app.schemas.notification import NotificationOut, NotificationListResponse
 
 logger = structlog.get_logger(__name__)
 router = APIRouter()
@@ -459,3 +461,62 @@ async def disable_company_invite(
     invite.active = False
     await db.commit()
     logger.info("company_invite_disabled", invite_id=str(invite_id), by=str(current_user.id))
+
+
+@router.get("/me/notifications", response_model=NotificationListResponse)
+async def list_my_notifications(
+    limit: int = Query(default=20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List the current user's notifications with unread count."""
+    unread = (
+        await db.execute(
+            select(func.count(Notification.id)).where(
+                Notification.user_id == current_user.id, Notification.is_read.is_(False)
+            )
+        )
+    ).scalar_one()
+
+    stmt = (
+        select(Notification)
+        .where(Notification.user_id == current_user.id)
+        .order_by(Notification.created_at.desc())
+        .limit(limit)
+    )
+    items = (await db.execute(stmt)).scalars().all()
+    return NotificationListResponse(items=items, unread_count=unread or 0)
+
+
+@router.post("/me/notifications/read-all", response_model=NotificationListResponse)
+async def read_all_my_notifications(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark all of the current user's notifications as read."""
+    stmt = select(Notification).where(
+        Notification.user_id == current_user.id, Notification.is_read.is_(False)
+    )
+    unread_items = (await db.execute(stmt)).scalars().all()
+    for n in unread_items:
+        n.is_read = True
+    await db.commit()
+    return NotificationListResponse(items=[], unread_count=0)
+
+
+@router.post("/me/notifications/{notification_id}/read", response_model=NotificationOut)
+async def mark_notification_read(
+    notification_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark a single notification as read."""
+    stmt = select(Notification).where(
+        Notification.id == notification_id, Notification.user_id == current_user.id
+    )
+    notification = (await db.execute(stmt)).scalars().first()
+    if not notification:
+        raise HTTPException(status_code=404, detail="Уведомление не найдено")
+    notification.is_read = True
+    await db.commit()
+    return notification

@@ -1,9 +1,22 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 import { api } from '@/lib/api';
+
+function formatNotifTime(value?: string): string {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  const diff = Date.now() - d.getTime();
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 1) return 'только что';
+  if (mins < 60) return `${mins} мин назад`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} ч назад`;
+  return d.toLocaleDateString('ru-RU', { day: '2-digit', month: 'short' });
+}
 
 interface SearchProject {
   id: string;
@@ -13,6 +26,16 @@ interface SearchProject {
   status: string;
 }
 
+interface AppNotification {
+  id: string;
+  type: string;
+  title: string;
+  message?: string;
+  link_url?: string;
+  is_read: boolean;
+  created_at?: string;
+}
+
 export function Header() {
   const router = useRouter();
   const { user } = useAuth();
@@ -20,8 +43,64 @@ export function Header() {
   const [results, setResults] = useState<SearchProject[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const notifRootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (notifRootRef.current && !notifRootRef.current.contains(e.target as Node)) setNotifOpen(false);
+    };
+    window.addEventListener('mousedown', onClick);
+    return () => window.removeEventListener('mousedown', onClick);
+  }, []);
+
+  const loadNotifications = useCallback(async () => {
+    try {
+      const res = await api.get('/users/me/notifications?limit=15');
+      setNotifications(res?.data?.items ?? []);
+      setUnreadCount(res?.data?.unread_count ?? 0);
+    } catch {
+      // silent — notifications are non-critical
+    }
+  }, []);
+
+  useEffect(() => {
+    loadNotifications();
+    const timer = setInterval(loadNotifications, 60_000);
+    return () => clearInterval(timer);
+  }, [loadNotifications]);
+
+  const handleOpenNotifications = async () => {
+    const next = !notifOpen;
+    setNotifOpen(next);
+    if (next) await loadNotifications();
+  };
+
+  const markAllRead = async () => {
+    try {
+      await api.post('/users/me/notifications/read-all', {});
+      setUnreadCount(0);
+      setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
+    } catch {
+      // silent
+    }
+  };
+
+  const openNotification = async (n: AppNotification) => {
+    if (!n.is_read) {
+      try {
+        await api.post(`/users/me/notifications/${n.id}/read`, {});
+      } catch {
+        // silent
+      }
+    }
+    setNotifOpen(false);
+    router.push(n.link_url || '/tenders');
+  };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -158,13 +237,76 @@ export function Header() {
 
       {/* Utilities */}
       <div className="flex items-center gap-4 shrink-0">
-        <button
-          className="w-8 h-8 flex items-center justify-center rounded border border-outline-variant bg-surface-container-lowest text-on-surface-variant hover:text-on-surface hover:border-on-background/30 transition-colors"
-          aria-label="Уведомления"
-          onClick={() => router.push('/settings')}
-        >
-          <span className="material-symbols-outlined text-[18px]">notifications</span>
-        </button>
+        <div ref={notifRootRef} className="relative">
+          <button
+            className="w-8 h-8 flex items-center justify-center rounded border border-outline-variant bg-surface-container-lowest text-on-surface-variant hover:text-on-surface hover:border-on-background/30 transition-colors relative"
+            aria-label="Уведомления"
+            onClick={handleOpenNotifications}
+          >
+            <span className="material-symbols-outlined text-[18px]">notifications</span>
+            {unreadCount > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[11px] font-bold flex items-center justify-center">
+                {unreadCount > 9 ? '9+' : unreadCount}
+              </span>
+            )}
+          </button>
+
+          {notifOpen && (
+            <div className="absolute right-0 top-full mt-2 w-96 max-w-[calc(100vw-2rem)] bg-surface-container-lowest border border-outline-variant rounded-lg shadow-xl overflow-hidden z-50">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-outline-variant">
+                <span className="text-title-sm font-title-sm text-on-surface">Уведомления</span>
+                {unreadCount > 0 && (
+                  <button
+                    onClick={markAllRead}
+                    className="text-label-sm font-label-sm text-primary hover:underline"
+                  >
+                    Прочитать все
+                  </button>
+                )}
+              </div>
+              <ul className="max-h-96 overflow-y-auto">
+                {notifications.length === 0 ? (
+                  <li className="px-4 py-8 text-center text-body-sm font-body-sm text-on-surface-variant">
+                    Уведомлений пока нет
+                  </li>
+                ) : (
+                  notifications.map((n) => (
+                    <li key={n.id}>
+                      <button
+                        onClick={() => openNotification(n)}
+                        className={`w-full text-left px-4 py-3 hover:bg-surface-container-low transition-colors flex gap-3 ${
+                          !n.is_read ? 'bg-surface-container-low/60' : ''
+                        }`}
+                      >
+                        <span
+                          className={`material-symbols-outlined text-[18px] mt-0.5 shrink-0 ${
+                            n.type === 'tender_status' ? 'text-primary' : 'text-amber-600'
+                          }`}
+                        >
+                          {n.type === 'tender_status' ? 'swap_vert' : 'schedule'}
+                        </span>
+                        <span className="flex flex-col min-w-0">
+                          <span className="text-body-md font-body-md text-on-surface">{n.title}</span>
+                          {n.message && (
+                            <span className="text-body-sm font-body-sm text-on-surface-variant mt-0.5 line-clamp-2">
+                              {n.message}
+                            </span>
+                          )}
+                          <span className="text-mono-sm text-on-surface-variant mt-1 opacity-70">
+                            {formatNotifTime(n.created_at)}
+                          </span>
+                        </span>
+                        {!n.is_read && (
+                          <span className="w-2 h-2 rounded-full bg-primary shrink-0 mt-1.5" />
+                        )}
+                      </button>
+                    </li>
+                  ))
+                )}
+              </ul>
+            </div>
+          )}
+        </div>
         <div
           className="w-8 h-8 rounded-full border border-outline-variant overflow-hidden bg-on-background text-on-primary flex items-center justify-center text-label-md font-label-md font-bold"
           title={user?.full_name ?? ''}

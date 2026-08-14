@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 from typing import Optional
-from sqlalchemy import String, Text, ForeignKey, DateTime, Numeric, Boolean
+from sqlalchemy import String, Text, ForeignKey, DateTime, Numeric, Boolean, Integer
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -31,6 +31,9 @@ class TenderLot(Base):
     status: Mapped[Optional[str]] = mapped_column(String(255), index=True)
     prev_status: Mapped[Optional[str]] = mapped_column(String(255))
     status_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # 0 = not warned, 1 = warned about 3 days left, 2 = 1 day left, 3 = deadline passed
+    deadline_warn_level: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
     start_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     deadline_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), index=True)

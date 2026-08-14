@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import asyncio
+from sqlalchemy import text
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
@@ -20,6 +21,24 @@ logger = structlog.get_logger(__name__)
 # up so Render marks the deploy as failed instead of serving a broken app.
 DB_SCHEMA_RETRIES = 5
 DB_SCHEMA_RETRY_DELAY = 10
+
+# create_all adds new tables but never alters existing ones; run additive
+# column migrations here (idempotent).
+ADDITIVE_MIGRATIONS = [
+    "ALTER TABLE tender_lots ADD COLUMN IF NOT EXISTS deadline_warn_level INTEGER NOT NULL DEFAULT 0",
+]
+
+async def _run_light_migrations() -> None:
+    from app.db.session import engine
+
+    try:
+        async with engine.begin() as conn:
+            for sql in ADDITIVE_MIGRATIONS:
+                await conn.execute(text(sql))
+        logger.info("light_migrations_ok", count=len(ADDITIVE_MIGRATIONS))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("light_migrations_skipped", error=str(e))
+
 
 async def _ensure_db_schema() -> None:
     from app.db.base import Base
@@ -74,6 +93,7 @@ async def lifespan(app: FastAPI):
     logger.info("app_starting", version=settings.APP_VERSION, env=settings.APP_ENV)
     await init_redis()
     await ensure_storage_buckets()
+    await _run_light_migrations()
     await _ensure_db_schema()
     
     yield
