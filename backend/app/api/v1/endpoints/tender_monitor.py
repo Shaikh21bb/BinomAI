@@ -10,6 +10,7 @@ from app.api.deps import get_db, get_current_user
 from app.db.models.user import User
 from app.db.models.tender_lot import TenderLot
 from app.schemas.tender_lot import TenderLotCreate, TenderLotOut, TenderLotListResponse
+from app.schemas.project import ProjectResponse as ProjectOut
 from app.services.tender_monitor import fetch_lot_page, TenderParseError
 from app.services.notifications import notify_company
 from app.core.config import settings
@@ -191,6 +192,55 @@ async def refresh_monitor_lot(
     await _refresh_lot(db, lot, save=True)
     await db.refresh(lot)
     return lot
+
+
+@router.post("/monitor/{lot_id}/project", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
+async def create_project_from_lot(
+    lot_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Create a project from a watched lot with all data prefilled."""
+    lot = (await db.execute(select(TenderLot).where(TenderLot.id == lot_id))).scalars().first()
+    if not lot:
+        raise HTTPException(status_code=404, detail="Лот не найден")
+    _ensure_company(lot, current_user)
+
+    from app.db.models.project import Project
+    from app.db.models.company import Company
+    from app.core.plans import get_plan
+
+    company = await db.get(Company, current_user.company_id)
+    plan = get_plan(company.plan if company else None)
+    if plan.max_projects is not None:
+        stmt = select(func.count()).select_from(Project).where(
+            Project.company_id == current_user.company_id
+        )
+        project_count = (await db.execute(stmt)).scalar() or 0
+        if project_count >= plan.max_projects:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Лимит проектов для тарифа «{plan.name}»: {project_count} из {plan.max_projects}. Обновите тариф.",
+            )
+
+    project = Project(
+        company_id=current_user.company_id,
+        created_by=current_user.id,
+        name=lot.name or f"Тендер {lot.lot_number}" or "Тендер без названия",
+        customer_name=lot.customer_name,
+        customer_bin=lot.customer_bin,
+        deadline_at=lot.deadline_at,
+        tender_number=lot.lot_number,
+        notes=f"Создано из мониторинга лотов. Источник: {lot.source_url}",
+    )
+    db.add(project)
+    await db.commit()
+    await db.refresh(project)
+    logger.info(
+        "project_created_from_lot",
+        project_id=str(project.id), lot_id=str(lot.id), by=str(current_user.id)
+    )
+    return project
 
 
 @router.delete("/monitor/{lot_id}", status_code=status.HTTP_204_NO_CONTENT)

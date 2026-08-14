@@ -1,5 +1,9 @@
 import uuid
-from fastapi import APIRouter, Depends, HTTPException
+import io
+import zipfile
+from urllib.parse import quote
+from datetime import datetime
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -90,6 +94,45 @@ async def export_document(
     return Response(
         content=content,
         media_type=mime,
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+        },
+    )
+
+
+@router.get("/{project_id}/documents/export-package")
+async def export_package(
+    project_id: uuid.UUID,
+    fmt: str = Query(default="pdf", pattern="^(pdf|docx)$"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Export all ready generated documents as a single ZIP package."""
+    await _get_project_or_404(db, project_id, current_user)
+    docs = await GenerationService.list_generated(db, project_id)
+    ready = [d for d in docs if d.generation_status == "ready"]
+    if not ready:
+        raise HTTPException(status_code=409, detail="Нет готовых документов для экспорта")
+
+    buf = io.BytesIO()
+    exported = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for doc in ready:
+            try:
+                content, _, _ = await GenerationService.export(db, project_id, doc.doc_type, fmt)
+            except Exception:  # noqa: BLE001
+                logger.warning("package_export_skipped", doc_type=doc.doc_type, project_id=str(project_id))
+                continue
+            zf.writestr(f"{doc.doc_type}.{fmt}", content)
+            exported += 1
+
+    if exported == 0:
+        raise HTTPException(status_code=502, detail="Не удалось подготовить ни одного документа")
+
+    filename = f"binom_package_{datetime.utcnow().strftime('%Y%m%d')}.zip"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
         headers={
             "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
         },

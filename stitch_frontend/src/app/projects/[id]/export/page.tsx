@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { api } from '@/lib/api';
+import { api, downloadBlob, errorMessage } from '@/lib/api';
 import { InfoBanner } from '@/components/ui';
 
 const DOC_TYPES = [
@@ -42,6 +42,8 @@ export default function ProjectExportPage() {
   const [exporting, setExporting] = useState<Record<string, 'docx' | 'pdf'>>({});
   const [backendUnavailable, setBackendUnavailable] = useState(false);
   const [done, setDone] = useState<string | null>(null);
+  const [packageBusy, setPackageBusy] = useState(false);
+  const [packageError, setPackageError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -57,6 +59,22 @@ export default function ProjectExportPage() {
       cancelled = true;
     };
   }, [projectId]);
+
+  const handleDownloadPackage = async () => {
+    setPackageBusy(true);
+    setPackageError('');
+    try {
+      await downloadBlob(
+        `/projects/${projectId}/documents/export-package?format=pdf`,
+        `binom_package_${new Date().toISOString().slice(0, 10)}.zip`
+      );
+      setDone('Пакет документов (ZIP)');
+    } catch (err) {
+      setPackageError(errorMessage(err, 'Не удалось скачать пакет'));
+    } finally {
+      setPackageBusy(false);
+    }
+  };
 
 const handleExport = async (docType: string, format: 'docx' | 'pdf') => {
     const doc = DOC_TYPES.find((d) => d.key === docType);
@@ -76,12 +94,37 @@ const handleExport = async (docType: string, format: 'docx' | 'pdf') => {
 
   return (
     <div className="p-4 md:p-margin-page max-w-3xl mx-auto flex-1 flex flex-col gap-stack-lg w-full">
-      <div>
-        <h2 className="text-headline-lg font-headline-lg text-on-surface">Экспорт документов</h2>
-        <p className="text-body-md font-body-md text-on-surface-variant">
-          Скачайте финальные документы в формате DOCX или PDF для подачи заявки.
-        </p>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h2 className="text-headline-lg font-headline-lg text-on-surface">Экспорт документов</h2>
+          <p className="text-body-md font-body-md text-on-surface-variant">
+            Скачайте финальные документы в формате DOCX или PDF для подачи заявки.
+          </p>
+        </div>
+        <button
+          onClick={handleDownloadPackage}
+          disabled={packageBusy}
+          className="px-4 py-2 bg-on-background text-on-primary rounded-lg text-label-md font-label-md disabled:opacity-50 hover:opacity-90 transition-opacity flex items-center gap-2"
+        >
+          {packageBusy ? (
+            <span className="flex items-center gap-2">
+              <span className="material-symbols-outlined animate-spin text-[16px]">sync</span>
+              Подготовка пакета…
+            </span>
+          ) : (
+            <>
+              <span className="material-symbols-outlined text-[16px]">folder_zip</span>
+              Скачать весь пакет (ZIP)
+            </>
+          )}
+        </button>
       </div>
+
+      {packageError && (
+        <div className="px-4 py-3 bg-red-50 text-red-800 border border-red-200 rounded-lg text-body-md font-body-md">
+          {packageError}
+        </div>
+      )}
 
       {backendUnavailable && (
         <InfoBanner>

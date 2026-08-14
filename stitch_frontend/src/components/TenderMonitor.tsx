@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { api, errorMessage } from '@/lib/api';
 import { StatusBadge, EmptyState, formatDate, InfoBanner, Spinner } from '@/components/ui';
 
@@ -45,6 +46,7 @@ function formatMoney(value?: string | number | null): string {
 }
 
 export function TenderMonitor() {
+  const router = useRouter();
   const [lots, setLots] = useState<MonitorLot[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
@@ -52,6 +54,7 @@ export function TenderMonitor() {
   const [isAdding, setIsAdding] = useState(false);
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [creatingId, setCreatingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -107,6 +110,20 @@ export function TenderMonitor() {
       setError(errorMessage(err, 'Не удалось удалить лот'));
     } finally {
       setDeletingId(null);
+    }
+  };
+
+  const handleCreateProject = async (lot: MonitorLot) => {
+    setCreatingId(lot.id);
+    setError('');
+    try {
+      const res = await api.post(`/tenders/monitor/${lot.id}/project`, {});
+      const projectId = (res?.data ?? res)?.id;
+      if (projectId) router.push(`/projects/${projectId}/document`);
+    } catch (err) {
+      setError(errorMessage(err, 'Не удалось создать проект'));
+    } finally {
+      setCreatingId(null);
     }
   };
 
@@ -190,6 +207,15 @@ export function TenderMonitor() {
                     </p>
                   </div>
                   <div className="flex gap-1.5 shrink-0">
+                    <button
+                      onClick={() => handleCreateProject(lot)}
+                      disabled={creatingId === lot.id}
+                      title="Создать проект из лота"
+                      className="px-3 h-9 rounded-lg bg-on-background text-on-primary text-label-md font-label-md flex items-center gap-1.5 hover:opacity-90 transition-opacity disabled:opacity-50"
+                    >
+                      <span className="material-symbols-outlined text-[16px]">add</span>
+                      Проект
+                    </button>
                     <button
                       onClick={() => handleRefresh(lot.id)}
                       disabled={refreshingId === lot.id}
