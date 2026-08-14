@@ -407,7 +407,7 @@ class GenerationService:
                 content = buf.getvalue()
             except Exception as e:  # noqa: BLE001
                 logger.error("pdf_generation_failed", error=str(e))
-                raise HTTPException(status_code=502, detail=f"Не удалось сформировать PDF: {e}")
+                raise HTTPException(status_code=502, detail="Не удалось сформировать PDF")
             mime = "application/pdf"
 
         ext = fmt.lower()
