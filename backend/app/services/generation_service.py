@@ -392,20 +392,22 @@ class GenerationService:
             content = GenerationService._md_to_docx_bytes(doc.title, doc.content_md)
             mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         else:
-            url = settings.GOTENBERG_URL.rstrip("/") + "/forms/libreoffice/convert?format=pdf"
-            files = {
-                "files": (
-                    f"{doc_type}.html",
-                    doc.content_html.encode("utf-8"),
-                    "text/html",
-                )
-            }
-            async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post(url, files=files)
-                if resp.status_code >= 400:
-                    logger.error("gotenberg_export_failed", status=resp.status_code, body=resp.text[:500])
-                    raise HTTPException(status_code=502, detail="Ошибка сервера экспорта")
-            content = resp.content
+            # PDF via WeasyPrint (pure Python, uses the pango/cairo libs already
+            # installed in the image). The standalone Gotenberg instance cannot
+            # run LibreOffice reliably on a 512MB free instance.
+            import io
+            from weasyprint import HTML
+
+            html = doc.content_html
+            if not html:
+                html = _full_html(doc.title, _md_to_html(doc.content_md or ""))
+            try:
+                buf = io.BytesIO()
+                HTML(string=html).write_pdf(buf)
+                content = buf.getvalue()
+            except Exception as e:  # noqa: BLE001
+                logger.error("pdf_generation_failed", error=str(e))
+                raise HTTPException(status_code=502, detail="Не удалось сформировать PDF")
             mime = "application/pdf"
 
         ext = fmt.lower()
