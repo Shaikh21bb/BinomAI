@@ -1,0 +1,19 @@
+name: keep-alive
+
+on:
+  schedule:
+    # Render free tier spins the service down after ~15 min of inactivity;
+    # pinging every 10 minutes keeps it warm and alerts on outages.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping backend readiness endpoint
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 120 \
+            https://binom-backend.onrender.com/api/v1/health/ready)
+          echo "health/ready -> HTTP $code"
+          [ "$code" = "200" ] || { echo "Backend is unhealthy"; exit 1; }

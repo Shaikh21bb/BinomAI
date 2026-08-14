@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
@@ -13,6 +14,31 @@ from app.core.supabase import supabase_admin
 from app.api.v1.api import api_router
 
 logger = structlog.get_logger(__name__)
+
+# During deploys Supabase's pooler can briefly be unreachable; retry instead
+# of shipping an instance with no schema. Fail hard when the DB never comes
+# up so Render marks the deploy as failed instead of serving a broken app.
+DB_SCHEMA_RETRIES = 5
+DB_SCHEMA_RETRY_DELAY = 10
+
+async def _ensure_db_schema() -> None:
+    from app.db.base import Base
+    from app.db.session import engine
+    import app.db.models  # ensure all models are registered
+
+    last_error: Exception | None = None
+    for attempt in range(1, DB_SCHEMA_RETRIES + 1):
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            logger.info("db_schema_ready", attempt=attempt)
+            return
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            logger.warning("db_create_all_retry", attempt=attempt, error=str(e))
+            if attempt < DB_SCHEMA_RETRIES:
+                await asyncio.sleep(DB_SCHEMA_RETRY_DELAY)
+    raise RuntimeError(f"db_schema_not_ready: {last_error}")
 
 REQUIRED_STORAGE_BUCKETS = [
     settings.STORAGE_BUCKET_TENDER_DOCS,
@@ -48,14 +74,7 @@ async def lifespan(app: FastAPI):
     logger.info("app_starting", version=settings.APP_VERSION, env=settings.APP_ENV)
     await init_redis()
     await ensure_storage_buckets()
-    try:
-        from app.db.base import Base
-        from app.db.session import engine
-        import app.db.models  # ensure all models are registered
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-    except Exception as e:
-        logger.error("db_create_all_failed", error=str(e))
+    await _ensure_db_schema()
     
     yield
     

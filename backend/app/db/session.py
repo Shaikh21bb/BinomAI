@@ -24,9 +24,10 @@ _db_connect_args = (
     else {}
 )
 
-# Session pooler caps at 10 client connections on the free plan.
+# Session pooler caps at 10 client connections on the free plan. Leave headroom:
+# Celery tasks use NullPool connections that can add up to `concurrency` more.
 _db_pool_kwargs = (
-    {"pool_size": 5, "max_overflow": 5}
+    {"pool_size": 5, "max_overflow": 2}
     if settings.DATABASE_SSL
     else {}
 )

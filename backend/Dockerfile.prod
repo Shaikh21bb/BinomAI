@@ -1,20 +1,33 @@
+# ---- build stage: install Python deps once, cacheable ----
+FROM python:3.11-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/deps -r requirements.txt
+
+# ---- runtime stage: minimal ----
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y \
-    libmupdf-dev \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \
     libcairo2 \
-    libffi-dev \
     redis-server \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+ENV PYTHONPATH=/deps/lib/python3.11/site-packages
+ENV PATH=/deps/bin:$PATH
 
+COPY --from=builder /deps /deps
 COPY . .
 
 RUN adduser --disabled-password --gecos "" appuser \
