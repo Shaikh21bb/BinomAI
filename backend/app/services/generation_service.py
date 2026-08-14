@@ -3,6 +3,7 @@ import re
 import time
 import uuid
 import structlog
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -13,7 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.ai.llm_client import call_llm
 from app.db.models.generated_document import GeneratedDocument
-from app.schemas.generated_document import GenerateRequest, GeneratedContent
+from app.db.models.project import Project
+from app.db.models.company import Company
+from app.schemas.generated_document import GeneratedContent
 
 logger = structlog.get_logger(__name__)
 
@@ -162,29 +165,60 @@ class GenerationService:
         return json.dumps(value, ensure_ascii=False, indent=1)
 
     @staticmethod
-    async def generate(
+    async def ensure_pending(
         db: AsyncSession,
         project,
         company,
-        req: GenerateRequest,
+        doc_type: str,
     ) -> GeneratedDocument:
-        """Generate a tender document based on analysis + chat context + company profile."""
-        analysis = await GenerationService._load_analysis_context(db, project.id)
-        chat = await GenerationService._load_chat_context(db, project.id)
-        company_data = GenerationService._load_company(company)
-
-        # Idempotency: if the latest version of this doc type is already ready,
-        # return it instead of spending another LLM call.
-        latest = await GenerationService.get_latest(db, project.id, req.doc_type)
+        """Idempotent entry point: return a ready doc, or create/reuse a pending "generating" row."""
+        latest = await GenerationService.get_latest(db, project.id, doc_type)
         if latest and latest.generation_status == "ready":
-            logger.info("generation_reused_existing", project_id=str(project.id), doc_type=req.doc_type, version=latest.version)
+            logger.info("generation_reused_existing", project_id=str(project.id), doc_type=doc_type, version=latest.version)
             if project.status in ("generating", "clarifying", "analyzing", "draft"):
                 project.status = "ready"
                 await db.commit()
             return latest
 
-        # Latest version
-        version = (latest.version if latest else 0) + 1
+        if latest and latest.generation_status == "generating":
+            age = (datetime.utcnow() - latest.updated_at).total_seconds()
+            if age < 900:
+                logger.info("generation_already_in_flight", project_id=str(project.id), doc_type=doc_type, version=latest.version)
+                return latest
+            latest.generation_status = "failed"
+            latest.error_message = "Генерация прервана по таймауту — запустите повторно"
+            version = latest.version + 1
+        else:
+            version = (latest.version if latest else 0) + 1
+
+        doc = GeneratedDocument(
+            project_id=project.id,
+            company_id=company.id,
+            doc_type=doc_type,
+            version=version,
+            title=DOC_TYPE_LABELS.get(doc_type, doc_type),
+            generation_status="generating",
+        )
+        db.add(doc)
+        await db.commit()
+        await db.refresh(doc)
+        return doc
+
+    @staticmethod
+    async def run_generation(db: AsyncSession, doc_id: uuid.UUID) -> Optional[GeneratedDocument]:
+        """Run the LLM for an existing pending document row (called from a Celery task)."""
+        doc = await db.get(GeneratedDocument, doc_id)
+        if not doc or doc.generation_status != "generating":
+            return doc
+        project = await db.get(Project, doc.project_id)
+        company = await db.get(Company, doc.company_id)
+        if project is None or company is None:
+            return doc
+
+        analysis = await GenerationService._load_analysis_context(db, project.id)
+        chat = await GenerationService._load_chat_context(db, project.id)
+        company_data = GenerationService._load_company(company)
+        doc_type = doc.doc_type
 
         context_blocks = [
             "## Данные компании",
@@ -203,19 +237,7 @@ class GenerationService:
             "## Уточнённые данные из диалога (clarification context)",
             json.dumps(chat, ensure_ascii=False, indent=1),
         ]
-        prompt = "\n\n".join(context_blocks) + f"\n\nЗадача:\n{DOC_TYPE_PROMPTS[req.doc_type]}"
-
-        doc = GeneratedDocument(
-            project_id=project.id,
-            company_id=company.id,
-            doc_type=req.doc_type,
-            version=version,
-            title=DOC_TYPE_LABELS.get(req.doc_type, req.doc_type),
-            generation_status="generating",
-        )
-        db.add(doc)
-        await db.commit()
-        await db.refresh(doc)
+        prompt = "\n\n".join(context_blocks) + f"\n\nЗадача:\n{DOC_TYPE_PROMPTS[doc_type]}"
 
         try:
             start = time.monotonic()
@@ -245,7 +267,7 @@ class GenerationService:
                 select(GeneratedDocument)
                 .where(
                     GeneratedDocument.project_id == project.id,
-                    GeneratedDocument.doc_type == req.doc_type,
+                    GeneratedDocument.doc_type == doc_type,
                     GeneratedDocument.id != doc.id,
                     GeneratedDocument.generation_status == "failed",
                 )
@@ -254,7 +276,7 @@ class GenerationService:
             for s in stale:
                 await db.delete(s)
         except Exception as e:
-            logger.error("generation_failed", project_id=str(project.id), doc_type=req.doc_type, error=str(e))
+            logger.error("generation_failed", project_id=str(project.id), doc_type=doc_type, error=str(e))
             doc.generation_status = "failed"
             doc.error_message = str(e)[:1000]
             # Roll the project back so the user can retry generation (don't leave it stuck in "generating")

@@ -23,11 +23,14 @@ interface GeneratedDoc {
 
 const STATUS_META: Record<string, { label: string; cls: string }> = {
   ready: { label: 'Готов', cls: 'bg-emerald-50 text-emerald-700' },
+  generating: { label: 'Генерируется…', cls: 'bg-amber-50 text-amber-700' },
   processing: { label: 'Генерируется…', cls: 'bg-amber-50 text-amber-700' },
   pending: { label: 'В очереди', cls: 'bg-amber-50 text-amber-700' },
   error: { label: 'Ошибка', cls: 'bg-red-50 text-red-700' },
   failed: { label: 'Ошибка', cls: 'bg-red-50 text-red-700' },
 };
+
+const NON_TERMINAL = new Set(['generating', 'processing', 'pending']);
 
 export default function ProjectExportPage() {
   const params = useParams();
@@ -57,6 +60,22 @@ export default function ProjectExportPage() {
       cancelled = true;
     };
   }, [projectId]);
+
+  useEffect(() => {
+    if (loading || docs.length === 0 || !docs.some((d) => NON_TERMINAL.has(d.generation_status))) return;
+    const timer = setInterval(async () => {
+      try {
+        const list = (await api.get(`/projects/${projectId}/documents/generated`)) as GeneratedDoc[];
+        setDocs(list);
+        if (!list.some((d) => NON_TERMINAL.has(d.generation_status))) {
+          clearInterval(timer);
+        }
+      } catch {
+        clearInterval(timer);
+      }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [projectId, docs, loading]);
 
   const readyDocs = docs.filter((d) => d.generation_status === 'ready');
 

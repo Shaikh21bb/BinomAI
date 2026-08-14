@@ -40,7 +40,7 @@ async def generate_document(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Generate a tender document using AI (analysis + chat context + company profile)."""
+    """Generate a tender document using AI in the background (Celery)."""
     project = await _get_project_or_404(db, project_id, current_user)
 
     stmt = select(Company).where(Company.id == current_user.company_id)
@@ -49,7 +49,11 @@ async def generate_document(
     if not company:
         raise HTTPException(status_code=404, detail="Company profile not found")
 
-    doc = await GenerationService.generate(db, project, company, body)
+    doc = await GenerationService.ensure_pending(db, project, company, body.doc_type)
+    if doc.generation_status == "generating":
+        from app.tasks.generation_tasks import generate_document_task
+
+        generate_document_task.delay(str(doc.id))
     return doc
 
 

@@ -150,30 +150,51 @@ export default function ProjectGeneratePage() {
 
   const handleGenerate = async (docType: string) => {
     setStatus((prev) => ({ ...prev, [docType]: 'generating' }));
+    setBackendUnavailable(false);
     try {
       const res = await api.post(`/projects/${projectId}/generate`, { doc_type: docType });
-      const id = res?.doc_id ?? res?.data?.doc_id;
-      if (id) {
-        setGenerated((prev) => [
-          {
-            id,
-            doc_type: docType,
-            generation_status: res?.generation_status ?? 'generating',
-            created_at: new Date().toISOString(),
-          },
-          ...prev.filter((d) => d.doc_type !== docType),
-        ]);
-        const listRes = await api.get(`/projects/${projectId}/documents/generated`);
-        setGenerated((listRes?.data ?? listRes ?? []) as GeneratedDoc[]);
+      const created = (res?.data ?? res ?? {}) as Partial<GeneratedDoc> & { doc_id?: string };
+      const id = String(created.id ?? created.doc_id ?? '');
+      if (!id) {
+        setStatus((prev) => ({ ...prev, [docType]: 'idle' }));
+        return;
+      }
+      setGenerated((prev) => [
+        {
+          id,
+          doc_type: docType,
+          version: created.version ?? 1,
+          generation_status: 'generating',
+          created_at: new Date().toISOString(),
+        },
+        ...prev.filter((d) => d.doc_type !== docType),
+      ]);
+
+      const deadline = Date.now() + 120000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 4000));
+        let all: GeneratedDoc[];
+        try {
+          const listRes = await api.get(`/projects/${projectId}/documents/generated`);
+          all = (listRes?.data ?? listRes ?? []) as GeneratedDoc[];
+        } catch {
+          continue;
+        }
+        setGenerated(all);
+        const current = all.find((d) => d.id === id);
+        if (!current) break;
+        if (current.generation_status === 'ready') {
+          openPreview(docType);
+          break;
+        }
+        if (current.generation_status === 'failed' || current.generation_status === 'error') break;
       }
     } catch {
       setBackendUnavailable(true);
       const label = DOC_TYPES.find((d) => d.key === docType)?.label ?? docType;
       setTimeout(() => setPreview({ key: docType, label }), 600);
     } finally {
-      setTimeout(() => {
-        setStatus((prev) => ({ ...prev, [docType]: 'ready' }));
-      }, 2800);
+      setStatus((prev) => ({ ...prev, [docType]: 'idle' }));
     }
   };
 
@@ -230,7 +251,13 @@ export default function ProjectGeneratePage() {
                     Ошибка генерации
                   </span>
                 )}
-                {docRecord && docRecord.generation_status !== 'failed' && (
+                {docRecord?.generation_status === 'generating' && (
+                  <span className="flex items-center gap-1.5 text-label-md font-label-md text-on-surface-variant bg-amber-50 border border-amber-200 rounded-md px-2.5 py-1 w-fit">
+                    <span className="material-symbols-outlined animate-spin text-[16px]">sync</span>
+                    Генерируется… {docRecord.version ? `· v${docRecord.version}` : ''}
+                  </span>
+                )}
+                {docRecord && docRecord.generation_status !== 'failed' && docRecord.generation_status !== 'generating' && (
                   <span className="flex items-center gap-1.5 text-label-md font-label-md text-primary bg-surface-container-high border border-outline-variant rounded-md px-2.5 py-1 w-fit">
                     <span className="material-symbols-outlined text-[16px]" style={{ fontVariationSettings: "'FILL' 1" }}>check_circle</span>
                     Версия {docRecord.version ?? 1}
