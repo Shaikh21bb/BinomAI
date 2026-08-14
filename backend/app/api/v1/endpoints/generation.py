@@ -87,7 +87,7 @@ async def export_document(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Export the latest generated document as DOCX or PDF via Gotenberg."""
+    """Export the latest generated document as DOCX or PDF."""
     await _get_project_or_404(db, project_id, current_user)
     content, filename, mime = await GenerationService.export(db, project_id, doc_type, body.format)
     from urllib.parse import quote

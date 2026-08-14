@@ -149,6 +149,43 @@ export async function downloadBlob(url: string, filename: string): Promise<void>
   URL.revokeObjectURL(objectUrl);
 }
 
+/** POST a JSON body and save the binary response as a file (e.g. single-doc export). */
+export async function downloadBlobPost(url: string, body: unknown, filename: string): Promise<void> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+  const headers = new Headers();
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  headers.set('Content-Type', 'application/json');
+  const response = await fetch(`${BASE_URL}${url}`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    let data: { error?: { message?: string }; detail?: unknown } | null = null;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+    const message =
+      (typeof data?.error?.message === 'string' ? data.error.message : null) ??
+      (typeof data?.detail === 'string' ? data.detail : null) ??
+      'Ошибка скачивания';
+    throw new APIError(message, response.status, data);
+  }
+
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = objectUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(objectUrl);
+}
+
 export interface ApiErrorShape {
   message?: string;
   status?: number;
