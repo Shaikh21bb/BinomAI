@@ -111,9 +111,7 @@ async def health_workers():
             "active": inspector.active(),
             "reserved": inspector.reserved(),
             "scheduled": inspector.scheduled(),
-            "registered_tasks": sorted(
-                name for name in (celery_app.tasks or {}) if name.startswith("app.tasks")
-            ),
+            "worker_registered": inspector.registered(),
         }
     except Exception as e:  # noqa: BLE001
         return {"error": str(e)}
