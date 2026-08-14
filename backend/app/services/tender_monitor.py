@@ -48,6 +48,8 @@ class TenderParseError(Exception):
 def _clean(value: str) -> str:
     value = re.sub(r"<[^>]+>", "", value)
     value = re.sub(r"\s+", " ", value).strip()
+    # The lot number cell may include a trailing "История" history link.
+    value = re.sub(r"\s+История\s*$", "", value)
     return value
 
 
