@@ -98,3 +98,22 @@ async def health_ready():
         media_type="application/json",
         status_code=status.HTTP_200_OK if health_status["status"] == "ok" else status.HTTP_503_SERVICE_UNAVAILABLE,
     )
+
+
+@router.get("/health/workers")
+async def health_workers():
+    """Diagnostics: what the Celery worker is doing right now."""
+    try:
+        from app.tasks.celery_app import celery_app
+
+        inspector = celery_app.control.inspect()
+        return {
+            "active": inspector.active(),
+            "reserved": inspector.reserved(),
+            "scheduled": inspector.scheduled(),
+            "registered_tasks": sorted(
+                name for name in (celery_app.tasks or {}) if name.startswith("app.tasks")
+            ),
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)}
