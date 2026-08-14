@@ -20,7 +20,7 @@ services:
       - key: CELERY_RESULT_BACKEND
         value: redis://localhost:6379/0
       - key: GOTENBERG_URL
-        value: http://binom-gotenberg:3000
+        value: https://binom-gotenberg.onrender.com
       - key: CORS_ORIGINS
         value: https://binom-ai-vprod.vercel.app,http://localhost:3000
       - key: DATABASE_URL
