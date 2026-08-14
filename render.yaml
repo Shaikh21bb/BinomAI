@@ -19,8 +19,6 @@ services:
         value: redis://localhost:6379/0
       - key: CELERY_RESULT_BACKEND
         value: redis://localhost:6379/0
-      - key: GOTENBERG_URL
-        value: https://binom-gotenberg.onrender.com
       - key: CORS_ORIGINS
         value: https://binom-ai-vprod.vercel.app,http://localhost:3000
       - key: DATABASE_URL
@@ -41,16 +39,3 @@ services:
         sync: false
       - key: FALLBACK_LLM_MODEL
         sync: false
-
-  - type: web
-    name: binom-gotenberg
-    runtime: docker
-    repo: https://github.com/Shaikh21bb/BinomAI
-    branch: main
-    dockerfilePath: backend/Dockerfile.gotenberg
-    dockerContext: ./backend
-    plan: free
-    healthCheckPath: /health
-    envVars:
-      - key: PORT
-        value: "3000"
