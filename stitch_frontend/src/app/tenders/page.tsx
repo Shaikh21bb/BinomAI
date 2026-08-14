@@ -1,13 +1,10 @@
 import { AppShell } from '@/components/AppShell';
-import { ProjectsDashboard } from '@/components/ProjectsDashboard';
+import { TenderMonitor } from '@/components/TenderMonitor';
 
 export default function TendersPage() {
   return (
     <AppShell>
-      <ProjectsDashboard
-        pageLabel="Активные тендеры"
-        pageDescription="Управление и контроль вашего тендерного портфеля."
-      />
+      <TenderMonitor />
     </AppShell>
   );
 }

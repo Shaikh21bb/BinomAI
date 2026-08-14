@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 import os
 from dotenv import load_dotenv
 
@@ -13,7 +14,8 @@ celery_app = Celery(
     include=[
         "app.tasks.document_tasks",
         "app.tasks.analysis_tasks",
-        "app.tasks.product_search_tasks"
+        "app.tasks.product_search_tasks",
+        "app.tasks.tender_tasks"
     ]
 )
 
@@ -27,4 +29,10 @@ celery_app.conf.update(
     task_time_limit=3600, # 1 hour max
     worker_prefetch_multiplier=1, # Fair dispatching
     broker_connection_retry_on_startup=True,
+    beat_schedule={
+        "refresh-tender-lots": {
+            "task": "app.tasks.tender_tasks.refresh_all_tenders",
+            "schedule": crontab(minute="*/15"),
+        },
+    },
 )

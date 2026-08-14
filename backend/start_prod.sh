@@ -15,6 +15,10 @@ celery -A app.tasks.celery_app worker \
   --max-tasks-per-child=50 \
   --max-memory-per-child=200000 &
 
+celery -A app.tasks.celery_app beat \
+  --loglevel=info \
+  --schedule /tmp/celerybeat-schedule &
+
 exec uvicorn app.main:app \
   --host 0.0.0.0 \
   --port "${PORT:-8000}" \
