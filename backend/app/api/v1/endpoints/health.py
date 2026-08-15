@@ -113,6 +113,18 @@ async def health_workers():
                 queue_len = await rc.llen("celery")
         except Exception as e:  # noqa: BLE001
             queue_len = f"error: {e}"
+        processes = []
+        try:
+            import asyncio as _asyncio
+            proc = await _asyncio.create_subprocess_exec(
+                "ps", "-eo", "pid,rss,comm,args", "--sort=-rss",
+                stdout=_asyncio.subprocess.PIPE,
+                stderr=_asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+            processes = stdout.decode(errors="replace").splitlines()[:14]
+        except Exception as e:  # noqa: BLE001
+            processes = [f"ps error: {e}"]
         return {
             "active": inspector.active(),
             "reserved": inspector.reserved(),
@@ -120,6 +132,7 @@ async def health_workers():
             "celery_queue_len": queue_len,
             "worker_stats": inspector.stats(),
             "worker_registered": inspector.registered(),
+            "processes_rss_kb": processes,
         }
     except Exception as e:  # noqa: BLE001
         return {"error": str(e)}
