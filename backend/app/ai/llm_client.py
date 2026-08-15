@@ -10,14 +10,11 @@ logger = structlog.get_logger(__name__)
 
 T = TypeVar('T', bound=BaseModel)
 
-# Gemini/OpenAI clients are created per-call: Celery workers run each task in its
-# own event loop (asyncio.run), and a module-level client would bind its HTTP
-# transport to a loop that gets closed after the first task, breaking later calls
-# with "Event loop is closed".
-#
-# The SDKs are also imported lazily per-call: importing google.generativeai at
-# module level adds ~200MB of RSS to every process (uvicorn + celery), which
-# triggers OOM kills on the 512MB free instance.
+# Clients are created per-call (no module-level transports): Celery workers run
+# each task in its own event loop (asyncio.run), and a module-level client would
+# bind its HTTP transport to a loop that gets closed after the first task.
+# LLM access goes over plain REST (httpx) — the heavy SDKs stay out of the process
+# to keep RSS low on the 512MB free instance.
 
 GPT4O_MAX_TOKENS = 120_000
 
@@ -56,32 +53,43 @@ class GeminiRequiredError(AIServiceUnavailableError):
     reraise=True
 )
 async def _call_gemini(prompt: str, system_prompt: str, schema_class: Type[T]) -> dict:
-    """Calls Gemini and expects a JSON output matching the schema."""
-    import google.generativeai as genai
+    """Calls Gemini via its plain REST API (no heavy SDK/grpc needed).
 
-    genai.configure(api_key=settings.GOOGLE_AI_API_KEY)
+    The google.generativeai SDK pulls ~200MB of deps (grpc, api-core) per process,
+    which OOMs the 512MB free Render instance when a Celery child runs a task.
+    """
+    import httpx
 
-    # We use GenerationConfig to enforce JSON output. 
-    # Since we can't always pass pydantic schema directly in older genai versions without issues,
-    # we enforce JSON application/json and rely on system prompt for schema structure.
-    
-    # Generate schema description to append to prompt
     schema_desc = json.dumps(schema_class.model_json_schema(), indent=2)
     full_prompt = f"{system_prompt}\n\nOUTPUT SCHEMA (Respond EXACTLY with this JSON structure):\n{schema_desc}\n\n{prompt}"
-    
-    gemini_model = genai.GenerativeModel(settings.PRIMARY_LLM_MODEL)
-    response = await gemini_model.generate_content_async(
-        full_prompt,
-        generation_config=genai.GenerationConfig(
-            response_mime_type="application/json",
-        ),
-        request_options={"timeout": 240},
+
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{settings.PRIMARY_LLM_MODEL}:generateContent"
     )
-    
-    if not response.text:
+    payload = {
+        "contents": [{"parts": [{"text": full_prompt}]}],
+        "generationConfig": {"responseMimeType": "application/json"},
+    }
+    async with httpx.AsyncClient(timeout=240) as client:
+        resp = await client.post(
+            url,
+            params={"key": settings.GOOGLE_AI_API_KEY},
+            json=payload,
+        )
+
+    if resp.status_code == 429:
+        raise GoogleRateLimit("Gemini rate limit")
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Gemini API {resp.status_code}: {resp.text[:300]}")
+
+    data = resp.json()
+    parts = (data.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
+    text = "".join(p.get("text", "") for p in parts)
+    if not text:
         raise ValueError("Empty response from Gemini")
-        
-    return json.loads(response.text)
+
+    return json.loads(text)
 
 @retry(
     stop=stop_after_attempt(3),
