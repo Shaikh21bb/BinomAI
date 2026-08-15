@@ -219,7 +219,11 @@ class GenerationService:
         await db.commit()
 
         analysis = await GenerationService._load_analysis_context(db, project.id)
+        doc.error_message = "s1 analysis_loaded"
+        await db.commit()
         chat = await GenerationService._load_chat_context(db, project.id)
+        doc.error_message = "s2 chat_loaded"
+        await db.commit()
         company_data = GenerationService._load_company(company)
         doc_type = doc.doc_type
 
@@ -241,6 +245,8 @@ class GenerationService:
             json.dumps(chat, ensure_ascii=False, indent=1),
         ]
         prompt = "\n\n".join(context_blocks) + f"\n\nЗадача:\n{DOC_TYPE_PROMPTS[doc_type]}"
+        doc.error_message = "s3 prompt_built"
+        await db.commit()
 
         try:
             start = time.monotonic()
