@@ -3,7 +3,7 @@ import re
 import time
 import uuid
 import structlog
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -181,7 +181,7 @@ class GenerationService:
             return latest
 
         if latest and latest.generation_status == "generating":
-            age = (datetime.utcnow() - latest.updated_at).total_seconds()
+            age = (datetime.now(timezone.utc) - latest.updated_at).total_seconds()
             if age < 900:
                 logger.info("generation_already_in_flight", project_id=str(project.id), doc_type=doc_type, version=latest.version)
                 return latest
