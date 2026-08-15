@@ -107,10 +107,18 @@ async def health_workers():
         from app.tasks.celery_app import celery_app
 
         inspector = celery_app.control.inspect()
+        queue_len = None
+        try:
+            async with redis.from_url(settings.REDIS_URL) as rc:
+                queue_len = await rc.llen("celery")
+        except Exception as e:  # noqa: BLE001
+            queue_len = f"error: {e}"
         return {
             "active": inspector.active(),
             "reserved": inspector.reserved(),
             "scheduled": inspector.scheduled(),
+            "celery_queue_len": queue_len,
+            "worker_stats": inspector.stats(),
             "worker_registered": inspector.registered(),
         }
     except Exception as e:  # noqa: BLE001
