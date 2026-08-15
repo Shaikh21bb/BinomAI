@@ -1,8 +1,6 @@
 import os
 import json
 import structlog
-import google.generativeai as genai
-from openai import AsyncOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 from typing import Type, TypeVar, Any
 from pydantic import BaseModel
@@ -16,7 +14,10 @@ T = TypeVar('T', bound=BaseModel)
 # own event loop (asyncio.run), and a module-level client would bind its HTTP
 # transport to a loop that gets closed after the first task, breaking later calls
 # with "Event loop is closed".
-genai.configure(api_key=settings.GOOGLE_AI_API_KEY)
+#
+# The SDKs are also imported lazily per-call: importing google.generativeai at
+# module level adds ~200MB of RSS to every process (uvicorn + celery), which
+# triggers OOM kills on the 512MB free instance.
 
 GPT4O_MAX_TOKENS = 120_000
 
@@ -56,6 +57,10 @@ class GeminiRequiredError(AIServiceUnavailableError):
 )
 async def _call_gemini(prompt: str, system_prompt: str, schema_class: Type[T]) -> dict:
     """Calls Gemini and expects a JSON output matching the schema."""
+    import google.generativeai as genai
+
+    genai.configure(api_key=settings.GOOGLE_AI_API_KEY)
+
     # We use GenerationConfig to enforce JSON output. 
     # Since we can't always pass pydantic schema directly in older genai versions without issues,
     # we enforce JSON application/json and rely on system prompt for schema structure.
@@ -69,7 +74,8 @@ async def _call_gemini(prompt: str, system_prompt: str, schema_class: Type[T]) -
         full_prompt,
         generation_config=genai.GenerationConfig(
             response_mime_type="application/json",
-        )
+        ),
+        request_options={"timeout": 240},
     )
     
     if not response.text:
@@ -85,7 +91,13 @@ async def _call_gemini(prompt: str, system_prompt: str, schema_class: Type[T]) -
 )
 async def _call_openai(prompt: str, system_prompt: str, schema_class: Type[T]) -> dict:
     """Calls GPT-4o using Structured Outputs."""
-    openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    from openai import AsyncOpenAI
+
+    openai_client = AsyncOpenAI(
+        api_key=settings.OPENAI_API_KEY,
+        timeout=240,
+        max_retries=2,
+    )
     try:
         response = await openai_client.beta.chat.completions.parse(
             model="gpt-4o",

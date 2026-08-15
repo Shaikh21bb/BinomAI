@@ -9,7 +9,14 @@ from app.services.generation_service import GenerationService
 logger = structlog.get_logger(__name__)
 
 
-@shared_task(bind=True, time_limit=1200)
+@shared_task(
+    bind=True,
+    acks_late=True,
+    soft_time_limit=330,
+    time_limit=420,
+    max_retries=1,
+    default_retry_delay=30,
+)
 def generate_document_task(self, doc_id_str: str):
     """Run LLM generation for a pending GeneratedDocument row in the background."""
     doc_id = uuid.UUID(doc_id_str)
@@ -25,4 +32,6 @@ def generate_document_task(self, doc_id_str: str):
         return status
     except Exception as e:  # noqa: BLE001
         logger.error("document_generation_task_crashed", doc_id=doc_id_str, error=str(e))
-        return "error"
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=e)
+        raise
