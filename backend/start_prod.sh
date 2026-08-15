@@ -7,16 +7,14 @@ if ! redis-cli -p 6379 ping >/dev/null 2>&1; then
   sleep 1
 fi
 
-# Recycle child processes after 50 tasks to bound memory growth; the SDKs are
-# imported lazily (llm_client) so workers stay well under the 512MB container limit.
+# Single-process worker with embedded beat: keeps total RSS under the 512MB
+# container limit (separate worker+beat+2 children exceeded it and got OOM-killed).
 celery -A app.tasks.celery_app worker \
+  --beat \
+  --schedule /tmp/celerybeat-schedule \
   --loglevel=info \
-  --concurrency=2 \
+  --concurrency=1 \
   --max-tasks-per-child=50 &
-
-celery -A app.tasks.celery_app beat \
-  --loglevel=info \
-  --schedule /tmp/celerybeat-schedule &
 
 exec uvicorn app.main:app \
   --host 0.0.0.0 \
