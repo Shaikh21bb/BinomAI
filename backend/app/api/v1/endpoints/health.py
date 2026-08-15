@@ -115,16 +115,33 @@ async def health_workers():
             queue_len = f"error: {e}"
         processes = []
         try:
-            import asyncio as _asyncio
-            proc = await _asyncio.create_subprocess_exec(
-                "ps", "-eo", "pid,rss,comm,args", "--sort=-rss",
-                stdout=_asyncio.subprocess.PIPE,
-                stderr=_asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await proc.communicate()
-            processes = stdout.decode(errors="replace").splitlines()[:14]
+            import os as _os
+            rows = []
+            for pid in _os.listdir("/proc"):
+                if not pid.isdigit():
+                    continue
+                try:
+                    with open(f"/proc/{pid}/status") as f:
+                        rss = None
+                        name = None
+                        for line in f:
+                            if line.startswith("VmRSS:"):
+                                rss = line.split()[1]
+                            elif line.startswith("Name:"):
+                                name = line.split(":", 1)[1].strip()
+                        rows.append((int(rss) if rss else 0, pid, name))
+                except Exception:
+                    continue
+            rows.sort(reverse=True)
+            for rss, pid, name in rows[:12]:
+                try:
+                    with open(f"/proc/{pid}/cmdline", "rb") as f:
+                        cmd = f.read().decode(errors="replace").replace("\x00", " ").strip()
+                except Exception:
+                    cmd = ""
+                processes.append(f"{pid} {name} {rss}KB {cmd[:90]}")
         except Exception as e:  # noqa: BLE001
-            processes = [f"ps error: {e}"]
+            processes = [f"proc error: {e}"]
         return {
             "active": inspector.active(),
             "reserved": inspector.reserved(),
