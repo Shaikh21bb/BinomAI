@@ -142,7 +142,19 @@ async def health_workers():
                 processes.append(f"{pid} {name} {rss}KB {cmd[:90]}")
         except Exception as e:  # noqa: BLE001
             processes = [f"proc error: {e}"]
+        try:
+            import asyncio as _asyncio
+            import datetime as _datetime
+            async with async_session_factory() as _db:
+                _db_now = (await _db.execute(text("SELECT now()"))).scalar()
+            clock = {
+                "container_now": _datetime.datetime.now(_datetime.timezone.utc).isoformat(),
+                "db_now": str(_db_now),
+            }
+        except Exception as e:  # noqa: BLE001
+            clock = {"error": str(e)}
         return {
+            "clock": clock,
             "active": inspector.active(),
             "reserved": inspector.reserved(),
             "scheduled": inspector.scheduled(),
