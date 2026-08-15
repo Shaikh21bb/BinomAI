@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 from typing import Type, TypeVar, Any
@@ -71,11 +72,14 @@ async def _call_gemini(prompt: str, system_prompt: str, schema_class: Type[T]) -
         "contents": [{"parts": [{"text": full_prompt}]}],
         "generationConfig": {"responseMimeType": "application/json"},
     }
-    async with httpx.AsyncClient(timeout=240) as client:
-        resp = await client.post(
-            url,
-            params={"key": settings.GOOGLE_AI_API_KEY},
-            json=payload,
+    async with httpx.AsyncClient(timeout=180) as client:
+        resp = await asyncio.wait_for(
+            client.post(
+                url,
+                params={"key": settings.GOOGLE_AI_API_KEY},
+                json=payload,
+            ),
+            timeout=180,
         )
 
     if resp.status_code == 429:
@@ -103,18 +107,21 @@ async def _call_openai(prompt: str, system_prompt: str, schema_class: Type[T]) -
 
     openai_client = AsyncOpenAI(
         api_key=settings.OPENAI_API_KEY,
-        timeout=240,
+        timeout=180,
         max_retries=2,
     )
     try:
-        response = await openai_client.beta.chat.completions.parse(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ],
-            response_format=schema_class,
-            temperature=0.0
+        response = await asyncio.wait_for(
+            openai_client.beta.chat.completions.parse(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format=schema_class,
+                temperature=0.0
+            ),
+            timeout=180,
         )
     finally:
         await openai_client.close()
