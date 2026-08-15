@@ -35,5 +35,9 @@ celery_app.conf.update(
             "task": "app.tasks.tender_tasks.refresh_all_tenders",
             "schedule": crontab(minute="*/15"),
         },
+        "sweep-stale-generations": {
+            "task": "app.tasks.generation_tasks.sweep_stale_generations",
+            "schedule": crontab(minute="*/15"),
+        },
     },
 )

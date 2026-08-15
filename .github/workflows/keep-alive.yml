@@ -1,0 +1,19 @@
+name: keep-alive
+
+on:
+  schedule:
+    # Every 8 minutes — Render free services hibernate after ~15 min without traffic.
+    - cron: "*/8 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping backend
+        run: curl -fsS -m 30 -o /dev/null -w "backend http %{http_code}\n" https://binom-backend.onrender.com/api/v1/health/ready || true
+      - name: Ping frontend
+        run: curl -fsS -m 30 -o /dev/null -w "frontend http %{http_code}\n" https://binom-ai-vprod.vercel.app/ || true
