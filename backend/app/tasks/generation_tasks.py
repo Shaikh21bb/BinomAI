@@ -12,8 +12,8 @@ logger = structlog.get_logger(__name__)
 @shared_task(
     bind=True,
     acks_late=True,
-    soft_time_limit=330,
-    time_limit=420,
+    soft_time_limit=240,
+    time_limit=300,
     max_retries=1,
     default_retry_delay=30,
 )

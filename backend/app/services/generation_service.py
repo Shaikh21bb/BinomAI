@@ -215,6 +215,9 @@ class GenerationService:
         if project is None or company is None:
             return doc
 
+        doc.error_message = f"started {datetime.now(timezone.utc).isoformat()}"
+        await db.commit()
+
         analysis = await GenerationService._load_analysis_context(db, project.id)
         chat = await GenerationService._load_chat_context(db, project.id)
         company_data = GenerationService._load_company(company)
@@ -248,6 +251,7 @@ class GenerationService:
                 estimated_tokens=2048,
             )
             elapsed_ms = int((time.monotonic() - start) * 1000)
+            logger.info("llm_generation_done", doc_id=str(doc.id), elapsed_ms=elapsed_ms, model=model)
 
             content_md = parsed.content_md or ""
             title = parsed.title or doc.title
