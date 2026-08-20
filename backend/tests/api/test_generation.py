@@ -80,8 +80,8 @@ async def test_generate_returns_document():
 
     with patch("app.api.v1.endpoints.generation.ProjectService.get_project",
                new_callable=AsyncMock, return_value=make_project()), \
-         patch.object(GenerationService, "generate", new_callable=AsyncMock,
-                      return_value=gendoc) as mock_gen:
+         patch.object(GenerationService, "ensure_pending", new_callable=AsyncMock,
+                      return_value=gendoc) as mock_ensure:
         async for client in _make_client(db, user):
             resp = await client.post(
                 f"/api/v1/projects/{DUMMY_PROJECT_ID}/generate",
@@ -90,7 +90,7 @@ async def test_generate_returns_document():
 
     assert resp.status_code == 200
     assert resp.json()["generation_status"] == "generating"
-    mock_gen.assert_awaited_once()
+    mock_ensure.assert_awaited_once()
 
 
 @pytest.mark.asyncio

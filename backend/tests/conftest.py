@@ -9,6 +9,7 @@ def no_celery_publish():
          patch("app.tasks.analysis_tasks.run_analysis_task.delay"), \
          patch("app.api.v1.endpoints.analysis.run_analysis_task.delay"), \
          patch("app.api.v1.endpoints.products.search_products_task.delay"), \
+         patch("app.tasks.generation_tasks.generate_document_task.delay"), \
          patch("app.services.document_service.process_document.delay"):
         yield
 
