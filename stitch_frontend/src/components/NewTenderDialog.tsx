@@ -22,7 +22,7 @@ export function NewTenderDialog({ open, onClose }: { open: boolean; onClose: () 
     try {
       const body: Record<string, unknown> = { name };
       if (customerName.trim()) body.customer_name = customerName.trim();
-      if (deadlineAt) body.deadline_at = new Date(deadlineAt).toISOString();
+      if (deadlineAt) body.deadline_at = new Date(`${deadlineAt}T00:00:00`).toISOString();
       if (notes.trim()) body.notes = notes.trim();
 
       const project = await api.post('/projects/', body);

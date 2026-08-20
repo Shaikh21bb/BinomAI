@@ -37,6 +37,14 @@ const STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: 'error', label: 'Ошибка' },
 ];
 
+function toLocalInput(iso?: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 interface Props {
   pageLabel?: string;
   pageDescription?: string;
@@ -473,7 +481,7 @@ export function ProjectsDashboard({ pageLabel = 'Мои тендеры', pageDes
                   <input
                     type="datetime-local"
                     className="w-full bg-surface-container-lowest border border-outline-variant rounded-md px-3 py-2 text-body-md font-body-md text-on-surface focus:outline-none focus:border-on-background"
-                    value={editDraft.deadline_at ? new Date(editDraft.deadline_at).toISOString().slice(0, 16) : ''}
+                    value={toLocalInput(editDraft.deadline_at)}
                     onChange={(e) =>
                       setEditDraft({ ...editDraft, deadline_at: e.target.value ? new Date(e.target.value).toISOString() : '' })
                     }

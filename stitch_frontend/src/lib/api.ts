@@ -117,12 +117,21 @@ export const api = {
   delete: (url: string, options?: RequestInit) => fetchWithAuth(url, { ...options, method: 'DELETE' }),
 };
 
-/** Download a binary response as a file (e.g. exported ZIP/PDF). */
-export async function downloadBlob(url: string, filename: string): Promise<void> {
+/** Fetch a binary endpoint (GET or POST) and save the response as a file. */
+export async function downloadFile(
+  url: string,
+  filename: string,
+  init: { method?: string; body?: unknown } = {}
+): Promise<void> {
   const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
   const headers = new Headers();
   if (token) headers.set('Authorization', `Bearer ${token}`);
-  const response = await fetch(`${BASE_URL}${url}`, { headers });
+  if (init.body !== undefined) headers.set('Content-Type', 'application/json');
+  const response = await fetch(`${BASE_URL}${url}`, {
+    method: init.method ?? 'GET',
+    headers,
+    body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+  });
 
   if (!response.ok) {
     let data: { error?: { message?: string }; detail?: unknown } | null = null;
@@ -149,41 +158,14 @@ export async function downloadBlob(url: string, filename: string): Promise<void>
   URL.revokeObjectURL(objectUrl);
 }
 
+/** Download a binary response as a file (e.g. exported ZIP/PDF). */
+export function downloadBlob(url: string, filename: string): Promise<void> {
+  return downloadFile(url, filename, { method: 'GET' });
+}
+
 /** POST a JSON body and save the binary response as a file (e.g. single-doc export). */
-export async function downloadBlobPost(url: string, body: unknown, filename: string): Promise<void> {
-  const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
-  const headers = new Headers();
-  if (token) headers.set('Authorization', `Bearer ${token}`);
-  headers.set('Content-Type', 'application/json');
-  const response = await fetch(`${BASE_URL}${url}`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    let data: { error?: { message?: string }; detail?: unknown } | null = null;
-    try {
-      data = await response.json();
-    } catch {
-      data = null;
-    }
-    const message =
-      (typeof data?.error?.message === 'string' ? data.error.message : null) ??
-      (typeof data?.detail === 'string' ? data.detail : null) ??
-      'Ошибка скачивания';
-    throw new APIError(message, response.status, data);
-  }
-
-  const blob = await response.blob();
-  const objectUrl = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = objectUrl;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(objectUrl);
+export function downloadBlobPost(url: string, body: unknown, filename: string): Promise<void> {
+  return downloadFile(url, filename, { method: 'POST', body });
 }
 
 export interface ApiErrorShape {
