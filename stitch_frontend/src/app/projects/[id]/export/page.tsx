@@ -32,6 +32,15 @@ const STATUS_META: Record<string, { label: string; cls: string }> = {
 
 const NON_TERMINAL = new Set(['generating', 'processing', 'pending']);
 
+function safeFileName(value: string): string {
+  const cleaned = value
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .trim();
+  return cleaned || 'document';
+}
+
 export default function ProjectExportPage() {
   const params = useParams();
   const projectId = params.id as string;
@@ -99,7 +108,7 @@ export default function ProjectExportPage() {
   const handleExport = async (doc: GeneratedDoc, format: 'docx' | 'pdf') => {
     setExporting((prev) => ({ ...prev, [doc.id]: format }));
     setDone(null);
-    const base = `${doc.title.replace(/\s+/g, '_')}_v${doc.version}.${format}`;
+    const base = `${safeFileName(doc.title)}_v${doc.version}.${format}`;
     try {
       await downloadBlobPost(
         `/projects/${projectId}/documents/generated/${doc.doc_type}/export`,
