@@ -130,7 +130,8 @@ export function TenderMonitor() {
     }
   };
 
-  const handleDelete = async (id: string) => {
+  const handleDelete = async (id: string, name?: string) => {
+    if (!window.confirm(`Удалить лот ${name ? `«${name}» ` : ''}из мониторинга?`)) return;
     setDeletingId(id);
     setError('');
     try {
@@ -392,7 +393,7 @@ export function TenderMonitor() {
                       </span>
                     </button>
                     <button
-                      onClick={() => handleDelete(lot.id)}
+                      onClick={() => handleDelete(lot.id, lot.name)}
                       disabled={deletingId === lot.id}
                       title="Удалить из мониторинга"
                       className="w-9 h-9 rounded-lg border border-outline-variant flex items-center justify-center hover:bg-red-50 hover:border-red-200 transition-colors disabled:opacity-50"

@@ -104,12 +104,14 @@ export default function ProjectProductsPage() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const itemsRef = useRef<ProductItem[] | null>(null);
 
   const loadItems = useCallback(
     async () => {
       try {
         const res = await api.get(`/projects/${projectId}/products`);
         const data = (Array.isArray(res) ? res : res?.items ?? []) as ProductItem[];
+        itemsRef.current = data;
         setItems(data);
         setError('');
       } catch (err) {
@@ -140,26 +142,26 @@ export default function ProjectProductsPage() {
     })();
   }, [loadItems]);
 
+  const busy = searching || (items ?? []).some((it) => it.status === 'searching' || it.status === 'pending');
+  const allDone = !(items ?? []).some((it) => it.status === 'searching' || it.status === 'pending');
+
   useEffect(() => {
     if (timerRef.current) clearInterval(timerRef.current);
-    if (searching) {
-      timerRef.current = setInterval(() => {
-        void (async () => {
-          await loadItems();
-          const anySearching = (items ?? []).some((it) => it.status === 'searching');
-          if (!anySearching && items != null) {
-            setSearching(false);
-            setNotice('Поиск завершён');
-          }
-        })();
-      }, 5000);
-    }
+    if (!busy) return;
+    timerRef.current = setInterval(() => {
+      void (async () => {
+        await loadItems();
+        const current = itemsRef.current;
+        if (current && !current.some((it) => it.status === 'searching' || it.status === 'pending')) {
+          setSearching(false);
+          setNotice('Поиск завершён');
+        }
+      })();
+    }, 5000);
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [searching, items, loadItems]);
-
-  const allDone = !(items ?? []).some((it) => it.status === 'searching' || it.status === 'pending');
+  }, [busy, loadItems]);
 
   return (
     <div className="px-4 md:px-margin-page py-stack-lg">
@@ -173,13 +175,13 @@ export default function ProjectProductsPage() {
           </div>
           <button
             onClick={startSearch}
-            disabled={searching}
+            disabled={busy}
             className="inline-flex items-center gap-2 px-4 py-2 bg-on-background text-on-primary rounded-lg text-label-md font-label-md hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <span className={`material-symbols-outlined text-[18px] ${searching ? 'animate-spin' : ''}`}>
-              {searching ? 'sync' : 'search'}
+            <span className={`material-symbols-outlined text-[18px] ${busy ? 'animate-spin' : ''}`}>
+              {busy ? 'sync' : 'search'}
             </span>
-            {searching ? 'Поиск…' : 'Найти товары'}
+            {busy ? 'Поиск…' : 'Найти товары'}
           </button>
         </div>
 
