@@ -61,6 +61,7 @@ export function TenderMonitor() {
   const [url, setUrl] = useState('');
   const [isAdding, setIsAdding] = useState(false);
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
+  const [refreshingAll, setRefreshingAll] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [creatingId, setCreatingId] = useState<string | null>(null);
 
@@ -111,6 +112,19 @@ export function TenderMonitor() {
       setError(errorMessage(err, 'Не удалось обновить лот'));
     } finally {
       setRefreshingId(null);
+    }
+  };
+
+  const handleRefreshAll = async () => {
+    setRefreshingAll(true);
+    setError('');
+    try {
+      await api.post('/tenders/monitor/refresh-all', {});
+      await load();
+    } catch (err) {
+      setError(errorMessage(err, 'Не удалось обновить лоты'));
+    } finally {
+      setRefreshingAll(false);
     }
   };
 
@@ -292,6 +306,19 @@ export function TenderMonitor() {
         >
           {isAdding ? 'Добавление…' : 'Добавить'}
         </button>
+        {lots.length > 0 && (
+          <button
+            onClick={handleRefreshAll}
+            disabled={refreshingAll}
+            title="Обновить все лоты сейчас"
+            className="px-4 py-2.5 rounded-lg border border-outline-variant bg-surface-container-lowest text-label-md font-label-md text-on-surface hover:bg-surface-container-high transition-colors disabled:opacity-50 flex items-center gap-1.5"
+          >
+            <span className={`material-symbols-outlined text-[18px] ${refreshingAll ? 'animate-spin' : ''}`}>
+              sync
+            </span>
+            {refreshingAll ? 'Проверка…' : 'Обновить все'}
+          </button>
+        )}
       </div>
 
       {error && (

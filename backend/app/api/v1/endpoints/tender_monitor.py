@@ -263,6 +263,36 @@ async def refresh_monitor_lot(
     return lot
 
 
+@router.post("/monitor/refresh-all")
+async def refresh_all_monitor_lots(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Manually re-check every watched lot of the company now (best-effort)."""
+    lots = (
+        (
+            await db.execute(
+                select(TenderLot)
+                .where(TenderLot.company_id == current_user.company_id)
+                .order_by(TenderLot.created_at.asc())
+                .limit(50)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    refreshed = 0
+    failed = 0
+    for lot in lots:
+        try:
+            await _refresh_lot(db, lot, save=True)
+            refreshed += 1
+        except Exception as e:  # noqa: BLE001
+            failed += 1
+            logger.warning("tender_lot_refresh_all_failed", lot_id=str(lot.id), error=str(e))
+    return {"refreshed": refreshed, "failed": failed, "total": len(lots)}
+
+
 @router.post("/monitor/{lot_id}/project", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
 async def create_project_from_lot(
     lot_id: uuid.UUID,
