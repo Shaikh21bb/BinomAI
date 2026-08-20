@@ -76,7 +76,9 @@ export function Header() {
   }, []);
 
   useEffect(() => {
-    loadNotifications();
+    void (async () => {
+      await loadNotifications();
+    })();
     const timer = setInterval(loadNotifications, 60_000);
     return () => clearInterval(timer);
   }, [loadNotifications]);

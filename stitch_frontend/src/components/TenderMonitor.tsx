@@ -81,7 +81,9 @@ export function TenderMonitor() {
   }, []);
 
   useEffect(() => {
-    load();
+    void (async () => {
+      await load();
+    })();
     const timer = setInterval(() => load(true), 60_000);
     return () => clearInterval(timer);
   }, [load]);

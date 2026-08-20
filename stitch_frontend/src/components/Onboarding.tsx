@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 const STEPS = [
   {
@@ -38,27 +38,42 @@ const STEPS = [
 
 const STORAGE_KEY = 'binom_onboarding_done';
 
+function readDoneFlag(): boolean {
+  try {
+    return window.localStorage.getItem(STORAGE_KEY) === '1';
+  } catch {
+    return true;
+  }
+}
+
 export function Onboarding() {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(() => !readDoneFlag());
   const [step, setStep] = useState(0);
-  const [auto, setAuto] = useState(false);
+  const [auto, setAuto] = useState(() => !readDoneFlag());
   const touchX = useRef<number | null>(null);
   const nextRef = useRef<HTMLButtonElement>(null);
 
-  useEffect(() => {
-    const fromStorage = () => {
+  const finish = useCallback(() => {
+    if (auto) {
       try {
-        return window.localStorage.getItem(STORAGE_KEY) === '1';
+        window.localStorage.setItem(STORAGE_KEY, '1');
       } catch {
-        return true;
+        /* ignore */
       }
-    };
-
-    if (!fromStorage()) {
-      setAuto(true);
-      setOpen(true);
     }
+    setOpen(false);
+  }, [auto]);
 
+  const next = useCallback(() => {
+    if (step < STEPS.length - 1) setStep((s) => s + 1);
+    else finish();
+  }, [step, finish]);
+
+  const prev = useCallback(() => {
+    if (step > 0) setStep((s) => s - 1);
+  }, [step]);
+
+  useEffect(() => {
     const onRequest = () => {
       setAuto(false);
       setStep(0);
@@ -70,11 +85,11 @@ export function Onboarding() {
 
   useEffect(() => {
     if (!open) return;
-    const prev = document.body.style.overflow;
+    const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     nextRef.current?.focus();
     return () => {
-      document.body.style.overflow = prev;
+      document.body.style.overflow = prevOverflow;
     };
   }, [open]);
 
@@ -90,28 +105,7 @@ export function Onboarding() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, step, auto]);
-
-  const finish = () => {
-    if (auto) {
-      try {
-        window.localStorage.setItem(STORAGE_KEY, '1');
-      } catch {
-        /* ignore */
-      }
-    }
-    setOpen(false);
-  };
-
-  const next = () => {
-    if (step < STEPS.length - 1) setStep((s) => s + 1);
-    else finish();
-  };
-
-  const prev = () => {
-    if (step > 0) setStep((s) => s - 1);
-  };
+  }, [open, step, auto, finish, next, prev]);
 
   if (!open) return null;
 

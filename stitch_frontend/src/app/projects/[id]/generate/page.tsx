@@ -170,8 +170,7 @@ export default function ProjectGeneratePage() {
         ...prev.filter((d) => d.doc_type !== docType),
       ]);
 
-      const deadline = Date.now() + 120000;
-      while (Date.now() < deadline) {
+      for (let attempt = 0; attempt < 30; attempt++) {
         await new Promise((r) => setTimeout(r, 4000));
         let all: GeneratedDoc[];
         try {

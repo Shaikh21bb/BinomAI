@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 import { api, errorMessage } from '@/lib/api';
@@ -94,7 +94,7 @@ export default function AdminPage() {
   const [creatingAccount, setCreatingAccount] = useState(false);
   const [accountCreated, setAccountCreated] = useState<AdminUser | null>(null);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       const [inv, usr, comp, reqs] = await Promise.all([
         api.get('/admin/invites'),
@@ -111,13 +111,14 @@ export default function AdminPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     if (user?.role !== 'owner') return;
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.role]);
+    void (async () => {
+      await load();
+    })();
+  }, [user?.role, load]);
 
   if (!user) return null;
   if (user.role !== 'owner') {
