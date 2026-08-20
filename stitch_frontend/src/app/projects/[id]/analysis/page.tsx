@@ -183,6 +183,7 @@ export default function ProjectAnalysisPage() {
   const [error, setError] = useState('');
   const [isRetrying, setIsRetrying] = useState(false);
   const [demoMode, setDemoMode] = useState(false);
+  const [processing, setProcessing] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -192,6 +193,7 @@ export default function ProjectAnalysisPage() {
         if (!cancelled) {
           setAnalysis(res);
           setNotFound(false);
+          setProcessing(res?.status === 'processing' || res?.status === 'pending');
         }
       } catch (err) {
         if (!cancelled) {
@@ -214,16 +216,29 @@ export default function ProjectAnalysisPage() {
     };
   }, [projectId]);
 
+  useEffect(() => {
+    if (!processing) return;
+    const timer = setInterval(async () => {
+      try {
+        const res = await api.get(`/analysis/${projectId}`);
+        if (res?.status === 'processing' || res?.status === 'pending') return;
+        setAnalysis(res);
+        setProcessing(false);
+        setNotFound(false);
+      } catch {
+        setProcessing(false);
+      }
+    }, 7000);
+    return () => clearInterval(timer);
+  }, [processing, projectId]);
+
   const handleRetry = async () => {
     setIsRetrying(true);
     setError('');
     try {
       await api.post(`/analysis/${projectId}/retry`, {});
       setNotFound(false);
-      setIsLoading(true);
-      setTimeout(() => {
-        window.location.reload();
-      }, 2500);
+      setProcessing(true);
     } catch (err) {
       setError(errorMessage(err, 'Не удалось запустить анализ'));
     } finally {
@@ -234,7 +249,57 @@ export default function ProjectAnalysisPage() {
   if (isLoading) {
     return (
       <div className="flex-1 flex items-center justify-center p-4 md:p-margin-page">
-        <Spinner label="Анализирую техническое задание..." />
+        <Spinner label="Загружаю анализ..." />
+      </div>
+    );
+  }
+
+  if (processing) {
+    return (
+      <div className="flex-1 flex items-center justify-center p-4 md:p-margin-page">
+        <div className="flex flex-col items-center gap-4 text-center max-w-md">
+          <span className="material-symbols-outlined animate-spin text-4xl text-primary">psychology</span>
+          <div>
+            <h3 className="text-headline-md font-headline-md text-on-surface mb-1">
+              ИИ анализирует техническое задание
+            </h3>
+            <p className="text-body-md font-body-md text-on-surface-variant">
+              Обычно это занимает 1–2 минуты. Страница обновится автоматически.
+            </p>
+          </div>
+          <Link
+            href={`/projects/${projectId}/document`}
+            className="px-4 py-2 bg-surface-bright border border-outline-variant rounded-lg text-label-md font-label-md text-on-surface"
+          >
+            Назад к ТЗ
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (analysis?.status === 'failed') {
+    return (
+      <div className="p-4 md:p-margin-page max-w-2xl mx-auto flex-1">
+        <div className="bg-error-container text-on-error-container rounded-lg p-4 text-body-md font-body-md">
+          Анализ не удался.
+          {analysis.error_message ? ` Причина: ${analysis.error_message}` : ''}
+        </div>
+        <div className="mt-4 flex gap-3">
+          <button
+            onClick={handleRetry}
+            disabled={isRetrying}
+            className="px-4 py-2 bg-on-background text-on-primary rounded-lg text-label-md font-label-md disabled:opacity-50"
+          >
+            {isRetrying ? 'Запуск...' : 'Повторить анализ'}
+          </button>
+          <Link
+            href={`/projects/${projectId}/document`}
+            className="px-4 py-2 bg-surface-bright border border-outline-variant rounded-lg text-label-md font-label-md text-on-surface"
+          >
+            Назад к ТЗ
+          </Link>
+        </div>
       </div>
     );
   }
@@ -264,7 +329,7 @@ export default function ProjectAnalysisPage() {
       <div className="p-4 md:p-margin-page max-w-2xl mx-auto flex-1">
         {!demoMode && (
           <InfoBanner className="mb-4">
-            Сервер анализа сейчас не подключён. {!error && 'Анализ ещё не выполнен.'}
+            Загрузите техническое задание, и ИИ проанализирует его автоматически.
           </InfoBanner>
         )}
         <div className="bg-surface-container-lowest border border-outline-variant rounded-lg p-10 flex flex-col items-center text-center gap-4">
@@ -332,7 +397,7 @@ export default function ProjectAnalysisPage() {
           className="px-3 py-1.5 border border-outline rounded-lg text-label-md font-label-md text-on-surface-variant hover:bg-surface-container-low disabled:opacity-50 flex items-center gap-2"
         >
           <span className="material-symbols-outlined text-[16px]">refresh</span>
-          {isRetrying ? 'Запуск...' : 'Обновить'}
+          {isRetrying ? 'Запуск...' : 'Переанализировать'}
         </button>
       </div>
 
