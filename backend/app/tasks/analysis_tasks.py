@@ -13,6 +13,7 @@ from app.ai.llm_client import AIQuotaExhaustedError
 from app.ai.analysis_agent import AnalysisAgent
 from app.core.supabase import supabase_admin
 from app.services.analysis_service import AnalysisService
+from app.services.notifications import notify_company
 
 logger = structlog.get_logger(__name__)
 
@@ -69,6 +70,17 @@ async def run_analysis_async(task, project_id_str: str, document_id_str: str, co
             if proj and proj.status in ("draft", "analyzing"):
                 proj.status = "clarifying"
                 await db.commit()
+
+            # 5. Notify the company that the analysis is ready
+            await notify_company(
+                db,
+                company_id,
+                "analysis_ready",
+                f"AI-анализ ТЗ завершён",
+                f"Анализ документа «{getattr(proj, 'name', '') or 'без названия'}» готов — можно переходить к уточнениям и генерации.",
+                f"/projects/{project_id}/analysis",
+            )
+            await db.commit()
 
             return {"status": "success", "analysis_id": str(analysis_id)}
             

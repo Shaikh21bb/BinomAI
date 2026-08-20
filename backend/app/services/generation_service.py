@@ -17,6 +17,7 @@ from app.db.models.generated_document import GeneratedDocument
 from app.db.models.project import Project
 from app.db.models.company import Company
 from app.schemas.generated_document import GeneratedContent
+from app.services.notifications import notify_company
 
 logger = structlog.get_logger(__name__)
 
@@ -292,6 +293,16 @@ class GenerationService:
             # Roll the project back so the user can retry generation (don't leave it stuck in "generating")
             if project.status == "generating":
                 project.status = "clarifying"
+
+        if doc.generation_status == "ready":
+            await notify_company(
+                db,
+                doc.company_id,
+                "document_ready",
+                f"Документ «{doc.title}» готов",
+                f"{DOC_TYPE_LABELS.get(doc_type, doc_type)} (версия {doc.version}) сгенерирована — можно экспортировать в PDF или DOCX.",
+                f"/projects/{project.id}/export",
+            )
 
         await db.commit()
         await db.refresh(doc)

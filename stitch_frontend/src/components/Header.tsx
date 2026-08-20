@@ -36,6 +36,13 @@ interface AppNotification {
   created_at?: string;
 }
 
+const NOTIF_STYLE: Record<string, { icon: string; cls: string }> = {
+  tender_status: { icon: 'swap_vert', cls: 'text-primary' },
+  tender_deadline: { icon: 'schedule', cls: 'text-red-600' },
+  analysis_ready: { icon: 'analytics', cls: 'text-primary' },
+  document_ready: { icon: 'description', cls: 'text-emerald-600' },
+};
+
 export function Header() {
   const router = useRouter();
   const { user } = useAuth();
@@ -280,10 +287,10 @@ export function Header() {
                       >
                         <span
                           className={`material-symbols-outlined text-[18px] mt-0.5 shrink-0 ${
-                            n.type === 'tender_status' ? 'text-primary' : 'text-amber-600'
+                            NOTIF_STYLE[n.type]?.cls ?? 'text-amber-600'
                           }`}
                         >
-                          {n.type === 'tender_status' ? 'swap_vert' : 'schedule'}
+                          {NOTIF_STYLE[n.type]?.icon ?? 'notifications'}
                         </span>
                         <span className="flex flex-col min-w-0">
                           <span className="text-body-md font-body-md text-on-surface">{n.title}</span>
