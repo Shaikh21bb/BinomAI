@@ -36,3 +36,10 @@ class TenderLotOut(BaseModel):
 class TenderLotListResponse(BaseModel):
     items: List[TenderLotOut]
     total: int
+
+
+class MonitorStatsResponse(BaseModel):
+    total: int
+    errors: int
+    deadlines_soon: List[TenderLotOut]
+    recent_changes: List[TenderLotOut]

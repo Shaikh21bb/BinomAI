@@ -25,6 +25,13 @@ export interface MonitorLot {
   last_error?: string;
 }
 
+interface MonitorStats {
+  total: number;
+  errors: number;
+  deadlines_soon: MonitorLot[];
+  recent_changes: MonitorLot[];
+}
+
 function deadlineLabel(deadline?: string): { text: string; urgent: boolean } {
   if (!deadline) return { text: '—', urgent: false };
   const d = new Date(deadline).getTime();
@@ -48,6 +55,7 @@ function formatMoney(value?: string | number | null): string {
 export function TenderMonitor() {
   const router = useRouter();
   const [lots, setLots] = useState<MonitorLot[]>([]);
+  const [stats, setStats] = useState<MonitorStats | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
   const [url, setUrl] = useState('');
@@ -56,12 +64,16 @@ export function TenderMonitor() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [creatingId, setCreatingId] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (silent = false) => {
     try {
-      const res = await api.get('/tenders/monitor');
-      setLots((res?.data?.items ?? res?.data ?? []) as MonitorLot[]);
+      const [lotsRes, statsRes] = await Promise.all([
+        api.get('/tenders/monitor'),
+        api.get('/tenders/monitor/stats'),
+      ]);
+      setLots((lotsRes?.data?.items ?? lotsRes?.data ?? []) as MonitorLot[]);
+      setStats((statsRes?.data ?? statsRes) as MonitorStats);
     } catch (err) {
-      setError(errorMessage(err, 'Не удалось загрузить лоты'));
+      if (!silent) setError(errorMessage(err, 'Не удалось загрузить лоты'));
     } finally {
       setIsLoading(false);
     }
@@ -69,6 +81,8 @@ export function TenderMonitor() {
 
   useEffect(() => {
     load();
+    const timer = setInterval(() => load(true), 60_000);
+    return () => clearInterval(timer);
   }, [load]);
 
   const handleAdd = async () => {
@@ -140,6 +154,128 @@ export function TenderMonitor() {
         Вставьте ссылку на страницу лота (например, <code className="text-xs">goszakup.gov.kz/ru/...</code>).
         Сервис сохранит данные лота и будет автоматически проверять его статус и дедлайн.
       </InfoBanner>
+
+      {stats && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4">
+            <div className="flex items-center gap-2 text-on-surface-variant">
+              <span className="material-symbols-outlined text-[18px]">radar</span>
+              <span className="text-label-md font-label-md">Лоты под контролем</span>
+            </div>
+            <p className="text-headline-lg font-headline-lg font-bold text-on-surface mt-1.5">
+              {stats.total}
+            </p>
+          </div>
+          <div className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4">
+            <div className="flex items-center gap-2 text-on-surface-variant">
+              <span className="material-symbols-outlined text-[18px]">hourglass_top</span>
+              <span className="text-label-md font-label-md">Дедлайны ≤ 3 дней</span>
+            </div>
+            <p
+              className={`text-headline-lg font-headline-lg font-bold mt-1.5 ${
+                stats.deadlines_soon.length > 0 ? 'text-red-600' : 'text-on-surface'
+              }`}
+            >
+              {stats.deadlines_soon.length}
+            </p>
+          </div>
+          <div className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4">
+            <div className="flex items-center gap-2 text-on-surface-variant">
+              <span className="material-symbols-outlined text-[18px]">swap_vert</span>
+              <span className="text-label-md font-label-md">Изменения за 7 дней</span>
+            </div>
+            <p className="text-headline-lg font-headline-lg font-bold text-on-surface mt-1.5">
+              {stats.recent_changes.length}
+            </p>
+          </div>
+          <div className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4">
+            <div className="flex items-center gap-2 text-on-surface-variant">
+              <span className="material-symbols-outlined text-[18px]">error_outline</span>
+              <span className="text-label-md font-label-md">Ошибки проверки</span>
+            </div>
+            <p
+              className={`text-headline-lg font-headline-lg font-bold mt-1.5 ${
+                stats.errors > 0 ? 'text-amber-600' : 'text-on-surface'
+              }`}
+            >
+              {stats.errors}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {stats && (stats.deadlines_soon.length > 0 || stats.recent_changes.length > 0) && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {stats.deadlines_soon.length > 0 && (
+            <div className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4">
+              <h2 className="text-title-sm font-title-sm text-on-surface mb-3 flex items-center gap-2">
+                <span className="material-symbols-outlined text-[18px] text-red-600">hourglass_top</span>
+                Ближайшие дедлайны
+              </h2>
+              <ul className="space-y-2.5">
+                {stats.deadlines_soon.map((lot) => {
+                  const dl = deadlineLabel(lot.deadline_at);
+                  return (
+                    <li key={lot.id} className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-body-sm font-body-md text-on-surface truncate">
+                          {lot.lot_number ? `№ ${lot.lot_number}` : ''}{' '}
+                          {lot.name || lot.source_url}
+                        </p>
+                        {lot.customer_name && (
+                          <p className="text-label-sm font-label-sm text-on-surface-variant truncate">
+                            {lot.customer_name}
+                          </p>
+                        )}
+                      </div>
+                      <span
+                        className={`text-label-sm font-label-sm shrink-0 ${dl.urgent ? 'text-red-600 font-bold' : 'text-on-surface-variant'}`}
+                      >
+                        {formatDate(lot.deadline_at)} ({dl.text})
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+
+          {stats.recent_changes.length > 0 && (
+            <div className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4">
+              <h2 className="text-title-sm font-title-sm text-on-surface mb-3 flex items-center gap-2">
+                <span className="material-symbols-outlined text-[18px] text-primary">swap_vert</span>
+                Последние изменения статусов
+              </h2>
+              <ul className="space-y-2.5">
+                {stats.recent_changes.map((lot) => (
+                  <li key={lot.id} className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-body-sm font-body-md text-on-surface truncate">
+                        {lot.lot_number ? `№ ${lot.lot_number}` : ''}{' '}
+                        {lot.name || lot.source_url}
+                      </p>
+                      <p className="text-label-sm font-label-sm text-on-surface-variant truncate">
+                        {formatDate(lot.status_changed_at)}
+                      </p>
+                    </div>
+                    <span className="text-label-sm font-label-sm shrink-0 flex items-center gap-1.5">
+                      <span className="px-2 py-0.5 rounded bg-surface-container-high text-on-surface-variant">
+                        {lot.prev_status ?? '—'}
+                      </span>
+                      <span className="material-symbols-outlined text-[14px] text-on-surface-variant">
+                        arrow_forward
+                      </span>
+                      <span className="px-2 py-0.5 rounded bg-primary/10 text-primary">
+                        {lot.status ?? '—'}
+                      </span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="flex gap-2">
         <input

@@ -9,7 +9,7 @@ import structlog
 from app.api.deps import get_db, get_current_user
 from app.db.models.user import User
 from app.db.models.tender_lot import TenderLot
-from app.schemas.tender_lot import TenderLotCreate, TenderLotOut, TenderLotListResponse
+from app.schemas.tender_lot import TenderLotCreate, TenderLotOut, TenderLotListResponse, MonitorStatsResponse
 from app.schemas.project import ProjectResponse as ProjectOut
 from app.services.tender_monitor import fetch_lot_page, TenderParseError
 from app.services.notifications import notify_company
@@ -164,6 +164,75 @@ async def list_monitor_lots(
     stmt = stmt.order_by(TenderLot.deadline_at.asc().nulls_last(), TenderLot.created_at.desc())
     items = (await db.execute(stmt)).scalars().all()
     return TenderLotListResponse(items=items, total=total)
+
+
+@router.get("/monitor/stats", response_model=MonitorStatsResponse)
+async def get_monitor_stats(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Summary for the monitoring dashboard: totals, upcoming deadlines, recent status changes."""
+    company_id = current_user.company_id
+    now = datetime.now(timezone.utc)
+
+    total = (
+        await db.execute(
+            select(func.count()).select_from(TenderLot).where(TenderLot.company_id == company_id)
+        )
+    ).scalar_one()
+
+    errors = (
+        await db.execute(
+            select(func.count())
+            .select_from(TenderLot)
+            .where(TenderLot.company_id == company_id, TenderLot.last_error.is_not(None))
+        )
+    ).scalar_one()
+
+    deadlines_soon = (
+        (
+            await db.execute(
+                select(TenderLot)
+                .where(
+                    TenderLot.company_id == company_id,
+                    TenderLot.deadline_at.is_not(None),
+                    TenderLot.deadline_at >= now - timedelta(days=1),
+                    TenderLot.deadline_at <= now + timedelta(days=3),
+                )
+                .order_by(TenderLot.deadline_at.asc())
+                .limit(6)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    recent_changes = (
+        (
+            await db.execute(
+                select(TenderLot)
+                .where(
+                    TenderLot.company_id == company_id,
+                    TenderLot.status_changed_at.is_not(None),
+                    TenderLot.status_changed_at >= now - timedelta(days=7),
+                    TenderLot.prev_status.is_not(None),
+                    TenderLot.status.is_not(None),
+                    TenderLot.prev_status != TenderLot.status,
+                )
+                .order_by(TenderLot.status_changed_at.desc())
+                .limit(6)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    return MonitorStatsResponse(
+        total=total,
+        errors=errors,
+        deadlines_soon=deadlines_soon,
+        recent_changes=recent_changes,
+    )
 
 
 @router.get("/monitor/{lot_id}", response_model=TenderLotOut)
