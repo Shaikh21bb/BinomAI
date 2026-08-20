@@ -40,7 +40,13 @@ class AnalysisService:
             "company_id": company_id
         })
         
-        # Trigger 'ensure_single_current_analysis' handles deactivating others
+        # Deactivate previous current analyses of the same project
+        # (no DB trigger exists on this table)
+        await db.execute(
+            text("UPDATE analysis_results SET is_current = false WHERE project_id = :pid AND id != :id"),
+            {"pid": project_id, "id": analysis_id}
+        )
+        
         await db.commit()
         return analysis_id
 
