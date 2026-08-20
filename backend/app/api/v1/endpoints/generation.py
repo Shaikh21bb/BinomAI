@@ -94,12 +94,12 @@ async def export_document(
     """Export the latest generated document as DOCX or PDF."""
     await _get_project_or_404(db, project_id, current_user)
     content, filename, mime = await GenerationService.export(db, project_id, doc_type, body.format)
-    from urllib.parse import quote
+    ext = filename.rsplit(".", 1)[-1]
     return Response(
         content=content,
         media_type=mime,
         headers={
-            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+            "Content-Disposition": f"attachment; filename=export.{ext}; filename*=UTF-8''{quote(filename)}",
         },
     )
 

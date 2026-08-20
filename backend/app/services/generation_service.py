@@ -454,7 +454,7 @@ class GenerationService:
             mime = "application/pdf"
 
         ext = fmt.lower()
-        filename = f"{doc.title.replace(' ', '_')}_v{doc.version}.{ext}"
+        filename = f"{GenerationService._safe_filename(doc.title)}_v{doc.version}.{ext}"
 
         exported = list(doc.exported_formats or [])
         if ext not in exported:
@@ -463,3 +463,11 @@ class GenerationService:
             await db.commit()
 
         return content, filename, mime
+
+    @staticmethod
+    def _safe_filename(value: str) -> str:
+        """Strip characters that break downloads or are invalid in file names."""
+        cleaned = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", value)
+        cleaned = re.sub(r"\s+", "_", cleaned)
+        cleaned = re.sub(r"_+", "_", cleaned).strip()
+        return cleaned or "document"
