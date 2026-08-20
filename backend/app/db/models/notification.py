@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from sqlalchemy import String, Text, ForeignKey, DateTime, Boolean
 from sqlalchemy.orm import Mapped, mapped_column
@@ -26,5 +26,5 @@ class Notification(Base):
     is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false", index=True)
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.utcnow(), nullable=False
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )

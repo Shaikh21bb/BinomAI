@@ -61,14 +61,14 @@ async def _maybe_notify_deadline(db: AsyncSession, lot: TenderLot) -> None:
 
 async def _refresh_lot(db: AsyncSession, lot: TenderLot, save: bool = True) -> None:
     """Re-fetch a lot page and update fields. Never raises for parse errors."""
-    lot.last_check_at = datetime.utcnow()
+    lot.last_check_at = datetime.now(timezone.utc)
     try:
         data = fetch_lot_page(lot.source_url)
         new_status = str(data.get("status") or "").strip() or None
         if new_status and new_status != lot.status:
             lot.prev_status = lot.status
             lot.status = new_status
-            lot.status_changed_at = datetime.utcnow()
+            lot.status_changed_at = datetime.now(timezone.utc)
             await notify_company(
                 db, lot.company_id, "tender_status",
                 f"Статус лота {lot.lot_number or 'без номера'} изменился",
@@ -85,10 +85,10 @@ async def _refresh_lot(db: AsyncSession, lot: TenderLot, save: bool = True) -> N
         lot.deadline_at = data.get("deadline_at") or lot.deadline_at
         await _maybe_notify_deadline(db, lot)
         lot.last_error = None
-        lot.next_check_at = datetime.utcnow() + REFRESH_INTERVAL
+        lot.next_check_at = datetime.now(timezone.utc) + REFRESH_INTERVAL
     except TenderParseError as e:
         lot.last_error = str(e)
-        lot.next_check_at = datetime.utcnow() + timedelta(hours=1)
+        lot.next_check_at = datetime.now(timezone.utc) + timedelta(hours=1)
         logger.warning("tender_lot_refresh_failed", lot_id=str(lot.id), error=str(e))
     if save:
         await db.commit()
@@ -133,8 +133,8 @@ async def add_monitor_lot(
         status=str(parsed.get("status") or "").strip() or None,
         start_date=parsed.get("start_date"),
         deadline_at=parsed.get("deadline_at"),
-        last_check_at=datetime.utcnow(),
-        next_check_at=datetime.utcnow() + REFRESH_INTERVAL,
+        last_check_at=datetime.now(timezone.utc),
+        next_check_at=datetime.now(timezone.utc) + REFRESH_INTERVAL,
     )
     db.add(lot)
     await db.commit()

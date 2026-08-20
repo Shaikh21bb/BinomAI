@@ -2,7 +2,7 @@ import uuid
 import io
 import zipfile
 from urllib.parse import quote
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -133,7 +133,7 @@ async def export_package(
     if exported == 0:
         raise HTTPException(status_code=502, detail="Не удалось подготовить ни одного документа")
 
-    filename = f"binom_package_{datetime.utcnow().strftime('%Y%m%d')}.zip"
+    filename = f"binom_package_{datetime.now(timezone.utc).strftime('%Y%m%d')}.zip"
     return Response(
         content=buf.getvalue(),
         media_type="application/zip",

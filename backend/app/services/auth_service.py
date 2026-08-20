@@ -205,7 +205,7 @@ async def _consume_invite(db: AsyncSession, code: str) -> Invite | None:
 
     if not invite or not invite.active:
         return None
-    now = datetime.utcnow().replace(tzinfo=None)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     expires = invite.expires_at
     if expires is not None:
         if expires.tzinfo is not None:

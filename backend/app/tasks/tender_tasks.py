@@ -1,6 +1,6 @@
 import structlog
 from celery import shared_task
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app.db.session import async_task_session_factory as async_session_factory
@@ -15,7 +15,7 @@ def refresh_all_tenders(self):
     import asyncio
 
     async def _run():
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         async with async_session_factory() as db:
             stmt = (
                 select(TenderLot)
