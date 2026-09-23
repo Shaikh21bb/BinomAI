@@ -3,8 +3,7 @@ import uuid
 import structlog
 from typing import List, Optional
 from celery import shared_task
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from sqlalchemy import select
 
 from app.db.session import async_task_session_factory as async_session_factory
 from app.db.models.project import Project
@@ -14,6 +13,7 @@ from app.db.models.product_search import ProductSearchItem
 from app.core.supabase import supabase_admin
 from app.services.product_extraction import extract_products_from_text
 from app.services.market_search import search_products
+from app.services.sourcing import normalize_name, normalize_unit
 
 logger = structlog.get_logger(__name__)
 
@@ -74,24 +74,39 @@ async def run_product_search_async(task, project_id_str: str) -> dict:
 
         task.update_state(state="PROGRESS", meta={"step": f"Found {len(products)} products"})
 
-        # Clear previous search items for this project (re-search replaces results)
-        await db.execute(delete(ProductSearchItem).where(ProductSearchItem.project_id == project_id))
-        await db.commit()
-
+        # Preserve existing line-item IDs so linked supplier quotes and manual
+        # overrides survive a repeated discovery run.
+        existing_stmt = select(ProductSearchItem).where(ProductSearchItem.project_id == project_id)
+        existing = list((await db.execute(existing_stmt)).scalars().all())
+        existing_by_key = {
+            (normalize_name(row.product_name), normalize_unit(row.unit)): row
+            for row in existing
+            if row.status != "manual"
+        }
         stored = []
         for item in products:
-            ps = ProductSearchItem(
-                project_id=project_id,
-                company_id=proj.company_id,
-                product_name=item["product_name"],
-                specs=item.get("specs"),
-                unit=item.get("unit"),
-                quantity=item.get("quantity"),
-                source_section=item.get("source_section"),
-                status="searching",
-                search_region=region,
-            )
-            db.add(ps)
+            key = (normalize_name(item["product_name"]), normalize_unit(item.get("unit")))
+            ps = existing_by_key.get(key)
+            if ps:
+                ps.specs = item.get("specs") or ps.specs
+                ps.quantity = item.get("quantity") or ps.quantity
+                ps.source_section = item.get("source_section") or ps.source_section
+                ps.status = "searching"
+                ps.error_message = None
+                ps.search_region = region
+            else:
+                ps = ProductSearchItem(
+                    project_id=project_id,
+                    company_id=proj.company_id,
+                    product_name=item["product_name"],
+                    specs=item.get("specs"),
+                    unit=item.get("unit"),
+                    quantity=item.get("quantity"),
+                    source_section=item.get("source_section"),
+                    status="searching",
+                    search_region=region,
+                )
+                db.add(ps)
             await db.flush()
             stored.append(ps)
 
@@ -106,7 +121,7 @@ async def run_product_search_async(task, project_id_str: str) -> dict:
                 results = await search_products(query, region)
                 ps.results = results
                 ps.status = "ready"
-                ps.best_match = _pick_best(results)
+                ps.best_match = _pick_discovery_lead(results)
                 logger.info("product_search_done", product_id=str(ps.id), matches=len(results))
             except Exception as e:
                 logger.error("product_search_failed", product_id=str(ps.id), error=str(e))
@@ -117,21 +132,17 @@ async def run_product_search_async(task, project_id_str: str) -> dict:
         return {"status": "success", "products_found": len(stored)}
 
 
-def _pick_best(results: List[dict]) -> Optional[dict]:
-    """Prefer a match with a price, then a real product image, then a known shop."""
+def _pick_discovery_lead(results: List[dict]) -> Optional[dict]:
+    """Pick an evidence-rich lead without implying a lowest-price recommendation."""
     if not results:
         return None
-    with_price = [r for r in results if r.get("price")]
-    if with_price:
-        with_price.sort(key=lambda r: r["price"] or 0)
-        return with_price[0]
     # Prefer results with a real product photo over a favicon fallback
     def is_real_photo(r: dict) -> bool:
         img = r.get("image_url") or ""
         return bool(img) and "google.com/s2/favicons" not in img
-    with_photo = [r for r in results if is_real_photo(r)]
-    if with_photo:
-        return with_photo[0]
+    evidence_rich = [r for r in results if r.get("url") and r.get("snippet") and is_real_photo(r)]
+    if evidence_rich:
+        return evidence_rich[0]
     known_shops = [r for r in results if r.get("shop") and "маркетплейс" not in (r.get("title") or "")]
     return known_shops[0] if known_shops else results[0]
 
