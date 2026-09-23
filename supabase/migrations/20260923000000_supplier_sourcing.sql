@@ -24,13 +24,18 @@ CREATE INDEX IF NOT EXISTS idx_product_search_items_project ON product_search_it
 CREATE INDEX IF NOT EXISTS idx_product_search_items_company ON product_search_items(company_id);
 
 ALTER TABLE product_search_items ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS product_search_items_company_access ON product_search_items;
 DO $$
 BEGIN
     -- Local Docker development uses plain PostgreSQL without Supabase's auth schema.
     -- The backend still scopes every query by company_id; Supabase deployments also
     -- receive the database-level tenant policy below.
-    IF to_regprocedure('auth.jwt()') IS NOT NULL THEN
+    IF to_regprocedure('auth.jwt()') IS NOT NULL
+       AND NOT EXISTS (
+           SELECT 1 FROM pg_policies
+           WHERE schemaname = 'public'
+             AND tablename = 'product_search_items'
+             AND policyname = 'product_search_items_company_access'
+       ) THEN
         EXECUTE $policy$
             CREATE POLICY product_search_items_company_access ON product_search_items
                 FOR ALL USING (company_id = (auth.jwt() ->> 'company_id')::uuid)
@@ -54,10 +59,15 @@ CREATE TABLE IF NOT EXISTS sourcing_plans (
 CREATE INDEX IF NOT EXISTS idx_sourcing_plans_company ON sourcing_plans(company_id);
 
 ALTER TABLE sourcing_plans ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS sourcing_plans_company_access ON sourcing_plans;
 DO $$
 BEGIN
-    IF to_regprocedure('auth.jwt()') IS NOT NULL THEN
+    IF to_regprocedure('auth.jwt()') IS NOT NULL
+       AND NOT EXISTS (
+           SELECT 1 FROM pg_policies
+           WHERE schemaname = 'public'
+             AND tablename = 'sourcing_plans'
+             AND policyname = 'sourcing_plans_company_access'
+       ) THEN
         EXECUTE $policy$
             CREATE POLICY sourcing_plans_company_access ON sourcing_plans
                 FOR ALL USING (company_id = (auth.jwt() ->> 'company_id')::uuid)
@@ -120,10 +130,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_supplier_offers_selected_item
     WHERE is_selected AND item_id IS NOT NULL;
 
 ALTER TABLE supplier_offers ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS supplier_offers_company_access ON supplier_offers;
 DO $$
 BEGIN
-    IF to_regprocedure('auth.jwt()') IS NOT NULL THEN
+    IF to_regprocedure('auth.jwt()') IS NOT NULL
+       AND NOT EXISTS (
+           SELECT 1 FROM pg_policies
+           WHERE schemaname = 'public'
+             AND tablename = 'supplier_offers'
+             AND policyname = 'supplier_offers_company_access'
+       ) THEN
         EXECUTE $policy$
             CREATE POLICY supplier_offers_company_access ON supplier_offers
                 FOR ALL USING (company_id = (auth.jwt() ->> 'company_id')::uuid)
@@ -133,17 +148,53 @@ BEGIN
 END
 $$;
 
-DROP TRIGGER IF EXISTS set_product_search_items_updated_at ON product_search_items;
-CREATE TRIGGER set_product_search_items_updated_at
-    BEFORE UPDATE ON product_search_items
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgrelid = 'public.product_search_items'::regclass
+          AND tgname = 'set_product_search_items_updated_at'
+          AND NOT tgisinternal
+    ) THEN
+        EXECUTE $trigger$
+            CREATE TRIGGER set_product_search_items_updated_at
+                BEFORE UPDATE ON product_search_items
+                FOR EACH ROW EXECUTE FUNCTION update_updated_at()
+        $trigger$;
+    END IF;
+END
+$$;
 
-DROP TRIGGER IF EXISTS set_sourcing_plans_updated_at ON sourcing_plans;
-CREATE TRIGGER set_sourcing_plans_updated_at
-    BEFORE UPDATE ON sourcing_plans
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgrelid = 'public.sourcing_plans'::regclass
+          AND tgname = 'set_sourcing_plans_updated_at'
+          AND NOT tgisinternal
+    ) THEN
+        EXECUTE $trigger$
+            CREATE TRIGGER set_sourcing_plans_updated_at
+                BEFORE UPDATE ON sourcing_plans
+                FOR EACH ROW EXECUTE FUNCTION update_updated_at()
+        $trigger$;
+    END IF;
+END
+$$;
 
-DROP TRIGGER IF EXISTS set_supplier_offers_updated_at ON supplier_offers;
-CREATE TRIGGER set_supplier_offers_updated_at
-    BEFORE UPDATE ON supplier_offers
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgrelid = 'public.supplier_offers'::regclass
+          AND tgname = 'set_supplier_offers_updated_at'
+          AND NOT tgisinternal
+    ) THEN
+        EXECUTE $trigger$
+            CREATE TRIGGER set_supplier_offers_updated_at
+                BEFORE UPDATE ON supplier_offers
+                FOR EACH ROW EXECUTE FUNCTION update_updated_at()
+        $trigger$;
+    END IF;
+END
+$$;
