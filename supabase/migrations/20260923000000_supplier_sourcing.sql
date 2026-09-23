@@ -148,6 +148,24 @@ BEGIN
 END
 $$;
 
+DO $outer$
+BEGIN
+    IF to_regprocedure('public.update_updated_at()') IS NULL THEN
+        EXECUTE $create_function$
+            CREATE FUNCTION public.update_updated_at()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $function$
+            BEGIN
+                NEW.updated_at = now();
+                RETURN NEW;
+            END
+            $function$
+        $create_function$;
+    END IF;
+END
+$outer$;
+
 DO $$
 BEGIN
     IF NOT EXISTS (
