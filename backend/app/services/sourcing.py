@@ -437,7 +437,7 @@ def quote_row_payload(row: dict[str, Any]) -> dict[str, Any]:
     compliance_aliases = {
         "соответствует": "compliant", "compliant": "compliant", "да": "compliant",
         "частично": "partial", "partial": "partial",
-        "несоответствует": "noncompliant", "noncompliant": "noncompliant", "нет": "noncompliant",
+        "не соответствует": "noncompliant", "несоответствует": "noncompliant", "noncompliant": "noncompliant", "нет": "noncompliant",
         "неизвестно": "unknown", "unknown": "unknown", "": "unknown",
     }
     certificates = row.get("certificates")

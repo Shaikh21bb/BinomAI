@@ -112,6 +112,7 @@ def test_compliant_offer_beats_cheaper_noncompliant_offer():
     assert row["selected_offer_id"] == sound.id
     assert result["summary"]["estimated_cost_kzt"] == 10000.0
     assert result["summary"]["estimated_bid_kzt"] == 12500.0
+    assert result["summary"]["estimated_profit_kzt"] == 2500.0
     cheap_result = next(entry for entry in row["offers"] if entry["offer"]["id"] == cheap.id)
     assert "noncompliant" in {flag["code"] for flag in cheap_result["flags"]}
 
@@ -170,6 +171,16 @@ def test_csv_import_preserves_original_values():
     assert payload["unit_price"] == Decimal("450.50")
     assert payload["vat_included"] is True
     assert payload["compliance_status"] == "compliant"
+
+
+def test_csv_import_understands_spaced_noncompliance_status():
+    content = (
+        "supplier_name;item_name;unit_price;compliance\n"
+        "ТОО Кабель;Кабель ВВГнг 3x2.5;450;не соответствует\n"
+    ).encode("utf-8")
+    rows = parse_quote_file("quotes.csv", content)
+
+    assert quote_row_payload(rows[0])["compliance_status"] == "noncompliant"
 
 
 def test_rfq_is_a_draft_with_required_quote_fields():

@@ -125,6 +125,7 @@ async def update_sourcing_settings(
             project_id=project_id,
             company_id=current_user.company_id,
             target_margin_pct=payload.target_margin_pct,
+            base_currency="KZT",
         )
         db.add(plan)
         await db.flush()

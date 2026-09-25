@@ -11,7 +11,7 @@ const TABS = [
   { key: 'analysis', href: (id: string) => `/projects/${id}/analysis`, label: 'Анализ', icon: 'psychology' },
   { key: 'chat', href: (id: string) => `/projects/${id}/chat`, label: 'Диалог', icon: 'forum' },
   { key: 'generate', href: (id: string) => `/projects/${id}/generate`, label: 'Документы', icon: 'edit_document' },
-  { key: 'products', href: (id: string) => `/projects/${id}/products`, label: 'Товары', icon: 'inventory_2' },
+  { key: 'products', href: (id: string) => `/projects/${id}/products`, label: 'Снабжение', icon: 'inventory_2' },
   { key: 'export', href: (id: string) => `/projects/${id}/export`, label: 'Экспорт', icon: 'download' },
 ] as const;
 
