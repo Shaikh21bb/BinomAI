@@ -26,6 +26,13 @@ DB_SCHEMA_RETRY_DELAY = 10
 # column migrations here (idempotent).
 ADDITIVE_MIGRATIONS = [
     "ALTER TABLE tender_lots ADD COLUMN IF NOT EXISTS deadline_warn_level INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE product_search_items ADD COLUMN IF NOT EXISTS normalized_name VARCHAR(500)",
+    "ALTER TABLE product_search_items ADD COLUMN IF NOT EXISTS normalized_unit VARCHAR(50)",
+    "ALTER TABLE product_search_items ADD COLUMN IF NOT EXISTS required_certificates JSONB NOT NULL DEFAULT '[]'::jsonb",
+    "ALTER TABLE product_search_items ADD COLUMN IF NOT EXISTS warranty_required BOOLEAN NOT NULL DEFAULT false",
+    "ALTER TABLE product_search_items ADD COLUMN IF NOT EXISTS desired_delivery_date DATE",
+    "ALTER TABLE product_search_items ADD COLUMN IF NOT EXISTS source_type VARCHAR(30) NOT NULL DEFAULT 'document'",
+    "ALTER TABLE product_search_items ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true",
 ]
 
 async def _run_light_migrations() -> None:

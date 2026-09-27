@@ -3,7 +3,8 @@ import json
 import asyncio
 import structlog
 import httpx
-from typing import List, Dict, Any, Optional
+from datetime import datetime, timezone
+from typing import List, Dict, Any, Optional, Protocol
 
 from app.core.config import settings
 
@@ -18,6 +19,24 @@ MARKETPLACES = [
     {"name": "Technodom.kz", "url": "https://www.technodom.kz/katatalog/search/?q={q}"},
     {"name": "Wildberries.kz", "url": "https://www.wildberries.kz/catalog/0/search.aspx?search={q}"},
 ]
+
+
+class SupplierDiscoveryProvider(Protocol):
+    """Provider boundary for future verified supplier/search integrations."""
+
+    name: str
+
+    async def search(self, query: str, region: Optional[str]) -> List[Dict[str, Any]]:
+        ...
+
+
+def _discovery_metadata(provider: str, source_kind: str) -> Dict[str, Any]:
+    return {
+        "provider": provider,
+        "source_kind": source_kind,
+        "verified": False,
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 async def search_products(query: str, region: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -90,6 +109,7 @@ async def _google_cse(q: str, region: Optional[str]) -> List[Dict[str, Any]]:
             "city": region,
             "url": link,
             "image_url": img,
+            **_discovery_metadata("google_cse", "search_result"),
         })
     return out
 
@@ -129,6 +149,7 @@ async def _duckduckgo(query: str, region: Optional[str]) -> List[Dict[str, Any]]
             "city": region,
             "url": link,
             "image_url": None,
+            **_discovery_metadata("duckduckgo", "search_result"),
         })
     return results
 
@@ -201,6 +222,7 @@ def _marketplace_links(query: str, region: Optional[str]) -> List[Dict[str, Any]
             "city": region,
             "url": url,
             "image_url": None,
+            **_discovery_metadata("marketplace_directory", "marketplace_directory"),
         })
     return results
 

@@ -4,7 +4,7 @@ import structlog
 from typing import List, Optional
 from celery import shared_task
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from sqlalchemy import select
 
 from app.db.session import async_task_session_factory as async_session_factory
 from app.db.models.project import Project
@@ -14,6 +14,7 @@ from app.db.models.product_search import ProductSearchItem
 from app.core.supabase import supabase_admin
 from app.services.product_extraction import extract_products_from_text
 from app.services.market_search import search_products
+from app.services.supplier_comparison import normalize_name, normalize_unit
 
 logger = structlog.get_logger(__name__)
 
@@ -74,26 +75,62 @@ async def run_product_search_async(task, project_id_str: str) -> dict:
 
         task.update_state(state="PROGRESS", meta={"step": f"Found {len(products)} products"})
 
-        # Clear previous search items for this project (re-search replaces results)
-        await db.execute(delete(ProductSearchItem).where(ProductSearchItem.project_id == project_id))
-        await db.commit()
+        # Preserve stable line-item IDs so imported quotes and manual overrides are
+        # not destroyed by re-running extraction. Only document-sourced rows that
+        # disappear from the current document are deactivated.
+        existing_stmt = select(ProductSearchItem).where(ProductSearchItem.project_id == project_id)
+        existing = list((await db.execute(existing_stmt)).scalars().all())
+        existing_by_key = {
+            (row.normalized_name or normalize_name(row.product_name), row.normalized_unit or normalize_unit(row.unit)): row
+            for row in existing
+            if (row.source_type or "document") == "document"
+        }
+        for row in existing:
+            if (row.source_type or "document") == "document":
+                row.is_active = False
 
         stored = []
         for item in products:
-            ps = ProductSearchItem(
-                project_id=project_id,
-                company_id=proj.company_id,
-                product_name=item["product_name"],
-                specs=item.get("specs"),
-                unit=item.get("unit"),
-                quantity=item.get("quantity"),
-                source_section=item.get("source_section"),
-                status="searching",
-                search_region=region,
-            )
-            db.add(ps)
-            await db.flush()
+            normalized_name = normalize_name(item["product_name"])
+            normalized_unit = normalize_unit(item.get("unit"))
+            ps = existing_by_key.get((normalized_name, normalized_unit))
+            if ps:
+                ps.product_name = item["product_name"]
+                ps.specs = item.get("specs")
+                ps.unit = item.get("unit")
+                ps.quantity = item.get("quantity")
+                ps.source_section = item.get("source_section")
+            else:
+                ps = ProductSearchItem(
+                    project_id=project_id,
+                    company_id=proj.company_id,
+                    product_name=item["product_name"],
+                    specs=item.get("specs"),
+                    unit=item.get("unit"),
+                    quantity=item.get("quantity"),
+                    source_section=item.get("source_section"),
+                    normalized_name=normalized_name,
+                    normalized_unit=normalized_unit,
+                    source_type="document",
+                    required_certificates=[],
+                    warranty_required=False,
+                )
+                db.add(ps)
+                await db.flush()
+            ps.normalized_name = normalized_name
+            ps.normalized_unit = normalized_unit
+            ps.is_active = True
+            ps.status = "searching"
+            ps.error_message = None
+            ps.search_region = region
             stored.append(ps)
+
+        # Manual line items also benefit from supplier discovery.
+        stored_ids = {row.id for row in stored}
+        stored.extend(
+            row for row in existing
+            if row.is_active and row.source_type == "manual" and row.id not in stored_ids
+        )
 
         await db.commit()
 
@@ -118,22 +155,19 @@ async def run_product_search_async(task, project_id_str: str) -> dict:
 
 
 def _pick_best(results: List[dict]) -> Optional[dict]:
-    """Prefer a match with a price, then a real product image, then a known shop."""
+    """Pick the most useful discovery lead, never a purchasing recommendation."""
     if not results:
         return None
-    with_price = [r for r in results if r.get("price")]
-    if with_price:
-        with_price.sort(key=lambda r: r["price"] or 0)
-        return with_price[0]
-    # Prefer results with a real product photo over a favicon fallback
-    def is_real_photo(r: dict) -> bool:
-        img = r.get("image_url") or ""
-        return bool(img) and "google.com/s2/favicons" not in img
-    with_photo = [r for r in results if is_real_photo(r)]
-    if with_photo:
-        return with_photo[0]
-    known_shops = [r for r in results if r.get("shop") and "маркетплейс" not in (r.get("title") or "")]
-    return known_shops[0] if known_shops else results[0]
+    def quality(result: dict) -> tuple[int, int, int, int]:
+        image = result.get("image_url") or ""
+        real_page = result.get("source_kind") != "marketplace_directory"
+        return (
+            int(bool(result.get("url"))),
+            int(bool(result.get("shop")) and real_page),
+            int(bool(result.get("price"))),
+            int(bool(image) and "google.com/s2/favicons" not in image),
+        )
+    return max(results, key=quality)
 
 
 @shared_task(bind=True, max_retries=1, default_retry_delay=60)
