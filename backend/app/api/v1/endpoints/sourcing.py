@@ -15,6 +15,7 @@ from app.db.models.project import Project
 from app.db.models.sourcing import SourcingPlan, SupplierOffer
 from app.db.models.user import User
 from app.schemas.sourcing import (
+    DiscoveryBatchResult,
     DiscoveryOfferCreate,
     QuoteImportResult,
     RfqDraftRequest,
@@ -67,6 +68,82 @@ def _verified_discovery_lead(item: ProductSearchItem, source_url: str) -> dict |
         ):
             return result
     return None
+
+
+def _discovery_lead_score(lead: dict) -> int:
+    score = {"matched": 500, "partial": 350}.get(str(lead.get("match_status") or ""), 0)
+    for check in lead.get("checks") or []:
+        if not isinstance(check, dict):
+            continue
+        score += 12 if check.get("status") == "matched" else -20 if check.get("status") == "mismatch" else 0
+    if lead.get("image_url"):
+        score += 70
+    if lead.get("availability") == "InStock":
+        score += 30
+    if isinstance(lead.get("stock_quantity"), (int, float)) and lead["stock_quantity"] > 0:
+        score += 15
+    return score
+
+
+def _best_discovery_lead(item: ProductSearchItem) -> dict | None:
+    candidates = [
+        lead for lead in item.results or []
+        if isinstance(lead, dict)
+        and lead.get("is_product_page") is True
+        and lead.get("page_verified") is True
+        and lead.get("price") is not None
+        and lead.get("url")
+        and urlsplit(str(lead.get("url"))).scheme in {"http", "https"}
+        and lead.get("match_status") in {"matched", "partial"}
+    ]
+    return max(candidates, key=_discovery_lead_score, default=None)
+
+
+def _new_discovery_offer(
+    project_id: uuid.UUID,
+    company_id: uuid.UUID,
+    user_id: uuid.UUID,
+    item: ProductSearchItem,
+    lead: dict,
+) -> SupplierOffer:
+    source_url = str(lead.get("url") or "")
+    match_status = str(lead.get("match_status") or "unknown")
+    compliance_status = {
+        "matched": "compliant",
+        "partial": "partial",
+        "mismatch": "noncompliant",
+    }.get(match_status, "unknown")
+    characteristics = {
+        str(key)[:200]: str(value)[:1000]
+        for key, value in (lead.get("characteristics") or {}).items()
+    } if isinstance(lead.get("characteristics"), dict) else {}
+    host = urlsplit(source_url).hostname or "Открытый источник"
+    offer_payload = SupplierOfferCreate(
+        item_id=item.id,
+        supplier_name=str(lead.get("shop") or host)[:500],
+        original_item_name=str(lead.get("title") or item.product_name)[:500],
+        original_unit=item.unit,
+        unit_price=lead["price"],
+        price_quantity=1,
+        currency=str(lead.get("currency") or "KZT"),
+        available_quantity=lead.get("stock_quantity"),
+        characteristics=characteristics,
+        compliance_status=compliance_status,
+        compliance_notes=_discovery_compliance_notes(lead),
+        source_url=source_url,
+    )
+    return SupplierOffer(
+        **offer_payload.model_dump(exclude={"item_id"}),
+        project_id=project_id,
+        company_id=company_id,
+        item_id=item.id,
+        created_by=user_id,
+        normalized_item_name=normalize_name(offer_payload.original_item_name),
+        normalized_unit=normalize_unit(offer_payload.original_unit),
+        source_type="discovery",
+        match_status="matched",
+        match_confidence=Decimal("1"),
+    )
 
 
 async def _project_or_404(db: AsyncSession, project_id: uuid.UUID, user: User) -> Project:
@@ -274,51 +351,64 @@ async def create_offer_from_discovery(
     if (await db.execute(duplicate_stmt)).scalars().first():
         raise HTTPException(status_code=409, detail="Этот товар уже добавлен в сравнение")
 
-    match_status = str(lead.get("match_status") or "unknown")
-    compliance_status = {
-        "matched": "compliant",
-        "partial": "partial",
-        "mismatch": "noncompliant",
-    }.get(match_status, "unknown")
-    characteristics = {
-        str(key)[:200]: str(value)[:1000]
-        for key, value in (lead.get("characteristics") or {}).items()
-    } if isinstance(lead.get("characteristics"), dict) else {}
-    host = urlsplit(payload.source_url).hostname or "Открытый источник"
-
     try:
-        offer_payload = SupplierOfferCreate(
-            item_id=item.id,
-            supplier_name=str(lead.get("shop") or host)[:500],
-            original_item_name=str(lead.get("title") or item.product_name)[:500],
-            original_unit=item.unit,
-            unit_price=lead["price"],
-            price_quantity=1,
-            currency=str(lead.get("currency") or "KZT"),
-            available_quantity=lead.get("stock_quantity"),
-            characteristics=characteristics,
-            compliance_status=compliance_status,
-            compliance_notes=_discovery_compliance_notes(lead),
-            source_url=payload.source_url,
+        offer = _new_discovery_offer(
+            project_id,
+            current_user.company_id,
+            current_user.id,
+            item,
+            lead,
         )
     except (ValidationError, ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail="Данные карточки товара нельзя добавить в сравнение") from exc
-
-    offer = SupplierOffer(
-        **offer_payload.model_dump(exclude={"item_id"}),
-        project_id=project_id,
-        company_id=current_user.company_id,
-        item_id=item.id,
-        created_by=current_user.id,
-        normalized_item_name=normalize_name(offer_payload.original_item_name),
-        normalized_unit=normalize_unit(offer_payload.original_unit),
-        source_type="discovery",
-        match_status="matched",
-        match_confidence=Decimal("1"),
-    )
     db.add(offer)
     await db.flush()
     return offer
+
+
+@router.post("/{project_id}/sourcing/discovery-offers/best", response_model=DiscoveryBatchResult)
+async def add_best_discovery_offers(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    await _project_or_404(db, project_id, current_user)
+    items = await _items(db, project_id, current_user.company_id)
+    existing_stmt = select(SupplierOffer).where(
+        SupplierOffer.project_id == project_id,
+        SupplierOffer.company_id == current_user.company_id,
+        SupplierOffer.source_url.is_not(None),
+    )
+    existing = list((await db.execute(existing_stmt)).scalars().all())
+    existing_pairs = {(offer.item_id, offer.source_url) for offer in existing}
+    added = 0
+    skipped = 0
+    errors: list[str] = []
+
+    for item in items:
+        lead = _best_discovery_lead(item)
+        if not lead or (item.id, lead.get("url")) in existing_pairs:
+            skipped += 1
+            continue
+        try:
+            offer = _new_discovery_offer(
+                project_id,
+                current_user.company_id,
+                current_user.id,
+                item,
+                lead,
+            )
+        except (ValidationError, ValueError, TypeError):
+            errors.append(item.product_name)
+            skipped += 1
+            continue
+        db.add(offer)
+        existing_pairs.add((item.id, offer.source_url))
+        added += 1
+
+    if added:
+        await db.flush()
+    return DiscoveryBatchResult(added=added, skipped=skipped, errors=errors[:50])
 
 
 @router.patch("/{project_id}/sourcing/offers/{offer_id}", response_model=SupplierOfferResponse)

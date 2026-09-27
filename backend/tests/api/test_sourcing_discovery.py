@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
-from app.api.v1.endpoints.sourcing import create_offer_from_discovery
+from app.api.v1.endpoints.sourcing import (
+    _best_discovery_lead,
+    add_best_discovery_offers,
+    create_offer_from_discovery,
+)
 from app.db.models.product_search import ProductSearchItem
 from app.db.models.project import Project
 from app.db.models.sourcing import SupplierOffer
@@ -30,9 +34,9 @@ def make_project():
     return Project(id=PROJECT_ID, company_id=COMPANY_ID, created_by=USER_ID, name="Тендер")
 
 
-def make_item(*, verified: bool = True, price=1250):
+def make_item(*, item_id=ITEM_ID, verified: bool = True, price=1250):
     return ProductSearchItem(
-        id=ITEM_ID,
+        id=item_id,
         project_id=PROJECT_ID,
         company_id=COMPANY_ID,
         product_name="Кабель ВВГнг 3×2,5",
@@ -63,6 +67,24 @@ def make_db(*results):
     db = AsyncMock()
     db.add = MagicMock()
     db.execute = AsyncMock(side_effect=[scalar_first(value) for value in results])
+    db.flush = AsyncMock()
+    return db
+
+
+def scalars_all(values):
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = values
+    return result
+
+
+def make_batch_db(project, items, offers):
+    db = AsyncMock()
+    db.add = MagicMock()
+    db.execute = AsyncMock(side_effect=[
+        scalar_first(project),
+        scalars_all(items),
+        scalars_all(offers),
+    ])
     db.flush = AsyncMock()
     return db
 
@@ -133,3 +155,39 @@ async def test_create_offer_from_discovery_requires_verified_card_with_price(ver
 
     assert exc.value.status_code == 422
     db.add.assert_not_called()
+
+
+def test_best_discovery_lead_prefers_stronger_match():
+    item = make_item()
+    partial = item.results[0]
+    matched = {
+        **partial,
+        "url": "https://vendor.example/products/cable-exact",
+        "title": "Точное совпадение",
+        "match_status": "matched",
+        "image_url": None,
+        "availability": None,
+    }
+    item.results = [partial, matched, {**matched, "url": "ftp://private/product"}]
+
+    assert _best_discovery_lead(item) is matched
+
+
+@pytest.mark.asyncio
+async def test_add_best_discovery_offers_adds_missing_and_skips_duplicate():
+    first = make_item()
+    second_id = uuid.UUID("55555555-5555-5555-5555-555555555555")
+    second = make_item(item_id=second_id)
+    duplicate = SupplierOffer(item_id=second_id, source_url=SOURCE_URL)
+    db = make_batch_db(make_project(), [first, second], [duplicate])
+    user = User(id=USER_ID, company_id=COMPANY_ID, role="admin")
+
+    result = await add_best_discovery_offers(PROJECT_ID, db, user)
+
+    assert result.added == 1
+    assert result.skipped == 1
+    assert result.errors == []
+    created = db.add.call_args.args[0]
+    assert created.item_id == ITEM_ID
+    assert created.source_type == "discovery"
+    db.flush.assert_awaited_once()

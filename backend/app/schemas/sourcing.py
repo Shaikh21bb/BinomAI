@@ -89,6 +89,12 @@ class DiscoveryOfferCreate(BaseModel):
         return normalized
 
 
+class DiscoveryBatchResult(BaseModel):
+    added: int
+    skipped: int
+    errors: list[str] = Field(default_factory=list)
+
+
 class SupplierOfferUpdate(BaseModel):
     item_id: Optional[uuid.UUID] = None
     supplier_name: Optional[str] = Field(default=None, min_length=2, max_length=500)

@@ -4,34 +4,181 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { useParams } from 'next/navigation';
 import { api, downloadFile, errorMessage } from '@/lib/api';
 import { EmptyState, InfoBanner, Spinner } from '@/components/ui';
-import { ProductDiscoveryCards, type DiscoveryLead } from '@/components/ProductDiscoveryCards';
+import {
+  ProductDiscoveryCards,
+  isAutoComparableLead,
+  type DiscoveryLead,
+} from '@/components/ProductDiscoveryCards';
 
 type Numberish = number | string | null;
-interface Flag { code: string; level: 'error' | 'warning'; message: string; }
-interface Offer { id: string; item_id?: string | null; supplier_name: string; supplier_bin?: string | null; supplier_contact?: string | null; original_item_name: string; original_unit?: string | null; unit_price: Numberish; price_quantity: Numberish; currency: string; vat_included?: boolean | null; vat_rate?: Numberish; moq?: Numberish; available_quantity?: Numberish; delivery_cost?: Numberish; lead_time_days?: number | null; warranty_months?: number | null; certificates: string[]; compliance_status: string; compliance_notes?: string | null; match_status: string; match_confidence?: Numberish; is_selected: boolean; source_type: string; source_url?: string | null; }
-interface EvaluatedOffer { offer: Offer; required_offer_quantity?: number | null; purchased_quantity?: number | null; landed_cost_kzt?: number | null; landed_unit_cost_kzt?: number | null; score: number; eligible: boolean; flags: Flag[]; reasons: string[]; }
-interface TenderItem { id: string; product_name: string; specs?: string | null; unit?: string | null; normalized_unit?: string | null; quantity?: Numberish; source_section?: string | null; status: string; discovery_leads: DiscoveryLead[]; }
-interface ItemComparison { item: TenderItem; offers: EvaluatedOffer[]; recommended_offer_id?: string | null; selected_offer_id?: string | null; selection_is_manual: boolean; }
-interface Comparison { project: { id: string; name: string; deadline_at?: string | null }; settings: { target_margin_pct: Numberish; base_currency: string }; items: ItemComparison[]; unmatched_offers: Offer[]; summary: { line_items: number; covered_items: number; incomplete_items: number; estimated_cost_kzt?: number | null; estimated_bid_kzt?: number | null; estimated_profit_kzt?: number | null; is_complete: boolean; caveat: string; }; }
-interface RfqDraft { subject: string; body: string; disclaimer: string; }
-
-const fieldClass = 'w-full rounded-lg border border-outline-variant bg-surface-container-lowest px-3 py-2 text-body-md text-on-surface outline-none focus:border-primary';
-const secondaryButton = 'inline-flex items-center justify-center gap-2 rounded-lg border border-outline-variant bg-surface-container-lowest px-3 py-2 text-label-md font-label-md text-on-surface hover:border-primary disabled:opacity-50';
-const primaryButton = 'inline-flex items-center justify-center gap-2 rounded-lg bg-on-background px-4 py-2 text-label-md font-label-md text-on-primary hover:opacity-90 disabled:opacity-50';
-
-function asNumber(value: FormDataEntryValue | null): number | null { if (value == null || String(value).trim() === '') return null; const parsed = Number(String(value).replace(',', '.')); return Number.isFinite(parsed) ? parsed : null; }
-function money(value?: Numberish) { if (value == null || value === '') return '—'; return `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(Number(value))} ₸`; }
-function quoteMoney(value: Numberish, currency: string) { if (value == null || value === '') return '—'; return `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(Number(value))} ${currency}`; }
-function quantity(value?: Numberish, unit?: string | null) { if (value == null || value === '') return 'Количество не указано'; return `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 4 }).format(Number(value))} ${unit ?? ''}`.trim(); }
-function complianceLabel(status: string) { return ({ compliant: 'Соответствует', partial: 'Частично', noncompliant: 'Не соответствует', unknown: 'Не проверено' } as Record<string, string>)[status] ?? status; }
-
-function StatusBadge({ status }: { status: string }) {
-  const tone = status === 'compliant' ? 'bg-green-50 text-green-800 border-green-200' : status === 'noncompliant' ? 'bg-red-50 text-red-800 border-red-200' : 'bg-amber-50 text-amber-900 border-amber-200';
-  return <span className={`inline-flex rounded-md border px-2 py-0.5 text-label-sm font-label-sm ${tone}`}>{complianceLabel(status)}</span>;
+interface Flag {
+  code: string;
+  level: 'error' | 'warning';
+  message: string;
+}
+interface Offer {
+  id: string;
+  item_id?: string | null;
+  supplier_name: string;
+  supplier_bin?: string | null;
+  supplier_contact?: string | null;
+  original_item_name: string;
+  original_unit?: string | null;
+  unit_price: Numberish;
+  price_quantity: Numberish;
+  currency: string;
+  vat_included?: boolean | null;
+  vat_rate?: Numberish;
+  moq?: Numberish;
+  available_quantity?: Numberish;
+  delivery_cost?: Numberish;
+  lead_time_days?: number | null;
+  warranty_months?: number | null;
+  certificates: string[];
+  compliance_status: string;
+  compliance_notes?: string | null;
+  match_status: string;
+  match_confidence?: Numberish;
+  is_selected: boolean;
+  source_type: string;
+  source_url?: string | null;
+}
+interface EvaluatedOffer {
+  offer: Offer;
+  required_offer_quantity?: number | null;
+  purchased_quantity?: number | null;
+  landed_cost_kzt?: number | null;
+  landed_unit_cost_kzt?: number | null;
+  score: number;
+  eligible: boolean;
+  flags: Flag[];
+  reasons: string[];
+}
+interface TenderItem {
+  id: string;
+  product_name: string;
+  specs?: string | null;
+  unit?: string | null;
+  normalized_unit?: string | null;
+  quantity?: Numberish;
+  source_section?: string | null;
+  status: string;
+  discovery_leads: DiscoveryLead[];
+}
+interface ItemComparison {
+  item: TenderItem;
+  offers: EvaluatedOffer[];
+  recommended_offer_id?: string | null;
+  selected_offer_id?: string | null;
+  selection_is_manual: boolean;
+}
+interface Comparison {
+  project: { id: string; name: string; deadline_at?: string | null };
+  settings: { target_margin_pct: Numberish; base_currency: string };
+  items: ItemComparison[];
+  unmatched_offers: Offer[];
+  summary: {
+    line_items: number;
+    covered_items: number;
+    incomplete_items: number;
+    estimated_cost_kzt?: number | null;
+    estimated_bid_kzt?: number | null;
+    estimated_profit_kzt?: number | null;
+    is_complete: boolean;
+    caveat: string;
+  };
+}
+interface RfqDraft {
+  subject: string;
+  body: string;
+  disclaimer: string;
 }
 
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
-  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" role="dialog" aria-modal="true" aria-label={title}><div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-surface p-5 shadow-2xl"><div className="mb-5 flex items-center justify-between gap-3"><h3 className="text-headline-md font-headline-md text-on-surface">{title}</h3><button type="button" onClick={onClose} className="rounded-lg p-2 text-on-surface-variant hover:bg-surface-container" aria-label="Закрыть"><span className="material-symbols-outlined">close</span></button></div>{children}</div></div>;
+const fieldClass =
+  'w-full rounded-lg border border-outline-variant bg-surface-container-lowest px-3 py-2 text-body-md text-on-surface outline-none focus:border-primary';
+const secondaryButton =
+  'inline-flex items-center justify-center gap-2 rounded-lg border border-outline-variant bg-surface-container-lowest px-3 py-2 text-label-md font-label-md text-on-surface hover:border-primary disabled:opacity-50';
+const primaryButton =
+  'inline-flex items-center justify-center gap-2 rounded-lg bg-on-background px-4 py-2 text-label-md font-label-md text-on-primary hover:opacity-90 disabled:opacity-50';
+
+function asNumber(value: FormDataEntryValue | null): number | null {
+  if (value == null || String(value).trim() === '') return null;
+  const parsed = Number(String(value).replace(',', '.'));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+function money(value?: Numberish) {
+  if (value == null || value === '') return '—';
+  return `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(Number(value))} ₸`;
+}
+function quoteMoney(value: Numberish, currency: string) {
+  if (value == null || value === '') return '—';
+  return `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(Number(value))} ${currency}`;
+}
+function quantity(value?: Numberish, unit?: string | null) {
+  if (value == null || value === '') return 'Количество не указано';
+  return `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 4 }).format(Number(value))} ${unit ?? ''}`.trim();
+}
+function complianceLabel(status: string) {
+  return (
+    (
+      {
+        compliant: 'Соответствует',
+        partial: 'Частично',
+        noncompliant: 'Не соответствует',
+        unknown: 'Не проверено',
+      } as Record<string, string>
+    )[status] ?? status
+  );
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const tone =
+    status === 'compliant'
+      ? 'bg-green-50 text-green-800 border-green-200'
+      : status === 'noncompliant'
+        ? 'bg-red-50 text-red-800 border-red-200'
+        : 'bg-amber-50 text-amber-900 border-amber-200';
+  return (
+    <span
+      className={`inline-flex rounded-md border px-2 py-0.5 text-label-sm font-label-sm ${tone}`}
+    >
+      {complianceLabel(status)}
+    </span>
+  );
+}
+
+function Modal({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+    >
+      <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-surface p-5 shadow-2xl">
+        <div className="mb-5 flex items-center justify-between gap-3">
+          <h3 className="text-headline-md font-headline-md text-on-surface">{title}</h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg p-2 text-on-surface-variant hover:bg-surface-container"
+            aria-label="Закрыть"
+          >
+            <span className="material-symbols-outlined">close</span>
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
 }
 
 export default function ProjectProductsPage() {
@@ -47,69 +194,1026 @@ export default function ProjectProductsPage() {
   const [rfq, setRfq] = useState<RfqDraft | null>(null);
   const [margin, setMargin] = useState('15');
   const [addingDiscoveryUrl, setAddingDiscoveryUrl] = useState<string | null>(null);
+  const [offerToDelete, setOfferToDelete] = useState<Offer | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const searchStarted = useRef<number | null>(null);
 
   const load = useCallback(async () => {
-    try { const result = await api.get(`/projects/${projectId}/sourcing`) as Comparison; setData(result); setMargin(String(result.settings.target_margin_pct ?? 15)); setError(''); return result; }
-    catch (err) { setError(errorMessage(err, 'Не удалось загрузить сравнение')); return null; }
-    finally { setLoading(false); }
+    try {
+      const result = (await api.get(`/projects/${projectId}/sourcing`)) as Comparison;
+      setData(result);
+      setMargin(String(result.settings.target_margin_pct ?? 15));
+      setError('');
+      return result;
+    } catch (err) {
+      setError(errorMessage(err, 'Не удалось загрузить сравнение'));
+      return null;
+    } finally {
+      setLoading(false);
+    }
   }, [projectId]);
 
   useEffect(() => {
-    const timer = setTimeout(() => { void load(); }, 0);
+    const timer = setTimeout(() => {
+      void load();
+    }, 0);
     return () => clearTimeout(timer);
   }, [load]);
-  const hasBusyItems = data?.items.some(({ item }) => item.status === 'pending' || item.status === 'searching') ?? false;
+  const hasBusyItems =
+    data?.items.some(({ item }) => item.status === 'pending' || item.status === 'searching') ??
+    false;
   useEffect(() => {
     if (!searching && !hasBusyItems) return;
     if (searchStarted.current === null) searchStarted.current = Date.now();
-    const timer = setInterval(() => { void (async () => { const result = await load(); const hasBusy = result?.items.some(({ item }) => item.status === 'pending' || item.status === 'searching'); const elapsed = Date.now() - (searchStarted.current ?? Date.now()); if ((result?.items.length && !hasBusy) || elapsed > 120_000) { searchStarted.current = null; setSearching(false); setNotice(result?.items.length ? 'Извлечение и поиск источников завершены.' : 'Фоновая обработка завершена. Если позиций нет, проверьте структуру спецификации.'); } })(); }, 5000);
+    const timer = setInterval(() => {
+      void (async () => {
+        const result = await load();
+        const hasBusy = result?.items.some(
+          ({ item }) => item.status === 'pending' || item.status === 'searching'
+        );
+        const elapsed = Date.now() - (searchStarted.current ?? Date.now());
+        if ((result?.items.length && !hasBusy) || elapsed > 120_000) {
+          searchStarted.current = null;
+          setSearching(false);
+          setNotice(
+            result?.items.length
+              ? 'Извлечение и поиск источников завершены.'
+              : 'Фоновая обработка завершена. Если позиций нет, проверьте структуру спецификации.'
+          );
+        }
+      })();
+    }, 5000);
     return () => clearInterval(timer);
   }, [hasBusyItems, load, searching]);
   const allItems = useMemo(() => data?.items.map((row) => row.item) ?? [], [data]);
+  const hasAutoComparableProducts = useMemo(
+    () =>
+      data?.items.some(({ item, offers }) => {
+        const existingUrls = new Set(
+          offers.flatMap((row) => (row.offer.source_url ? [row.offer.source_url] : []))
+        );
+        return item.discovery_leads.some(
+          (lead) => isAutoComparableLead(lead) && !existingUrls.has(lead.url)
+        );
+      }) ?? false,
+    [data]
+  );
 
   async function run(action: () => Promise<unknown>, success: string) {
-    setWorking(true); setError(''); setNotice('');
-    try { await action(); await load(); setNotice(success); return true; }
-    catch (err) { setError(errorMessage(err)); return false; }
-    finally { setWorking(false); }
+    setWorking(true);
+    setError('');
+    setNotice('');
+    try {
+      await action();
+      await load();
+      setNotice(success);
+      return true;
+    } catch (err) {
+      setError(errorMessage(err));
+      return false;
+    } finally {
+      setWorking(false);
+    }
   }
-  async function startDiscovery() { setWorking(true); setError(''); try { await api.post(`/projects/${projectId}/products/search`, {}); searchStarted.current = Date.now(); setSearching(true); setNotice('Извлекаем позиции из последнего обработанного ТЗ и ищем источники. Веб-результаты будут помечены как непроверенные.'); } catch (err) { setError(errorMessage(err, 'Не удалось запустить извлечение')); } finally { setWorking(false); } }
-  async function submitItem(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = new FormData(event.currentTarget); const ok = await run(() => api.post(`/projects/${projectId}/sourcing/items`, { product_name: String(form.get('product_name') ?? ''), specs: String(form.get('specs') ?? '') || null, unit: String(form.get('unit') ?? '') || null, quantity: asNumber(form.get('quantity')) }), 'Позиция добавлена.'); if (ok) setModal(null); }
+  async function startDiscovery() {
+    setWorking(true);
+    setError('');
+    try {
+      await api.post(`/projects/${projectId}/products/search`, {});
+      searchStarted.current = Date.now();
+      setSearching(true);
+      setNotice(
+        'Извлекаем позиции из последнего обработанного ТЗ и ищем источники. Веб-результаты будут помечены как непроверенные.'
+      );
+    } catch (err) {
+      setError(errorMessage(err, 'Не удалось запустить извлечение'));
+    } finally {
+      setWorking(false);
+    }
+  }
+  async function submitItem(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const ok = await run(
+      () =>
+        api.post(`/projects/${projectId}/sourcing/items`, {
+          product_name: String(form.get('product_name') ?? ''),
+          specs: String(form.get('specs') ?? '') || null,
+          unit: String(form.get('unit') ?? '') || null,
+          quantity: asNumber(form.get('quantity')),
+        }),
+      'Позиция добавлена.'
+    );
+    if (ok) setModal(null);
+  }
   async function submitOffer(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); const form = new FormData(event.currentTarget); const vat = String(form.get('vat_included') ?? '');
-    const payload = { item_id: String(form.get('item_id') ?? '') || null, supplier_name: String(form.get('supplier_name') ?? ''), supplier_bin: String(form.get('supplier_bin') ?? '') || null, supplier_contact: String(form.get('supplier_contact') ?? '') || null, original_item_name: String(form.get('original_item_name') ?? ''), original_unit: String(form.get('original_unit') ?? '') || null, quoted_quantity: asNumber(form.get('quoted_quantity')), unit_price: asNumber(form.get('unit_price')), price_quantity: asNumber(form.get('price_quantity')) ?? 1, currency: String(form.get('currency') ?? 'KZT'), exchange_rate_to_kzt: asNumber(form.get('exchange_rate_to_kzt')), vat_included: vat === '' ? null : vat === 'true', vat_rate: asNumber(form.get('vat_rate')), moq: asNumber(form.get('moq')), available_quantity: asNumber(form.get('available_quantity')), delivery_cost: asNumber(form.get('delivery_cost')), lead_time_days: asNumber(form.get('lead_time_days')), warranty_months: asNumber(form.get('warranty_months')), certificates: String(form.get('certificates') ?? '').split(/[;,]/).map((value) => value.trim()).filter(Boolean), characteristics: {}, compliance_status: String(form.get('compliance_status') ?? 'unknown'), compliance_notes: String(form.get('compliance_notes') ?? '') || null, quote_date: String(form.get('quote_date') ?? '') || null, valid_until: String(form.get('valid_until') ?? '') || null, source_url: String(form.get('source_url') ?? '') || null };
-    const ok = await run(() => api.post(`/projects/${projectId}/sourcing/offers`, payload), 'Предложение добавлено и пересчитано.'); if (ok) setModal(null);
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const vat = String(form.get('vat_included') ?? '');
+    const payload = {
+      item_id: String(form.get('item_id') ?? '') || null,
+      supplier_name: String(form.get('supplier_name') ?? ''),
+      supplier_bin: String(form.get('supplier_bin') ?? '') || null,
+      supplier_contact: String(form.get('supplier_contact') ?? '') || null,
+      original_item_name: String(form.get('original_item_name') ?? ''),
+      original_unit: String(form.get('original_unit') ?? '') || null,
+      quoted_quantity: asNumber(form.get('quoted_quantity')),
+      unit_price: asNumber(form.get('unit_price')),
+      price_quantity: asNumber(form.get('price_quantity')) ?? 1,
+      currency: String(form.get('currency') ?? 'KZT'),
+      exchange_rate_to_kzt: asNumber(form.get('exchange_rate_to_kzt')),
+      vat_included: vat === '' ? null : vat === 'true',
+      vat_rate: asNumber(form.get('vat_rate')),
+      moq: asNumber(form.get('moq')),
+      available_quantity: asNumber(form.get('available_quantity')),
+      delivery_cost: asNumber(form.get('delivery_cost')),
+      lead_time_days: asNumber(form.get('lead_time_days')),
+      warranty_months: asNumber(form.get('warranty_months')),
+      certificates: String(form.get('certificates') ?? '')
+        .split(/[;,]/)
+        .map((value) => value.trim())
+        .filter(Boolean),
+      characteristics: {},
+      compliance_status: String(form.get('compliance_status') ?? 'unknown'),
+      compliance_notes: String(form.get('compliance_notes') ?? '') || null,
+      quote_date: String(form.get('quote_date') ?? '') || null,
+      valid_until: String(form.get('valid_until') ?? '') || null,
+      source_url: String(form.get('source_url') ?? '') || null,
+    };
+    const ok = await run(
+      () => api.post(`/projects/${projectId}/sourcing/offers`, payload),
+      'Предложение добавлено и пересчитано.'
+    );
+    if (ok) setModal(null);
   }
   async function addDiscoveryOffer(itemId: string, lead: DiscoveryLead) {
     if (!lead.url) return;
-    setAddingDiscoveryUrl(lead.url); setWorking(true); setError(''); setNotice('');
+    setAddingDiscoveryUrl(lead.url);
+    setWorking(true);
+    setError('');
+    setNotice('');
     try {
-      await api.post(`/projects/${projectId}/sourcing/items/${itemId}/offers/from-discovery`, { source_url: lead.url });
+      await api.post(`/projects/${projectId}/sourcing/items/${itemId}/offers/from-discovery`, {
+        source_url: lead.url,
+      });
       await load();
       setNotice(`«${lead.title || 'Товар'}» добавлен в сравнение поставщиков.`);
-    } catch (err) { setError(errorMessage(err, 'Не удалось добавить товар в сравнение')); }
-    finally { setAddingDiscoveryUrl(null); setWorking(false); }
+    } catch (err) {
+      setError(errorMessage(err, 'Не удалось добавить товар в сравнение'));
+    } finally {
+      setAddingDiscoveryUrl(null);
+      setWorking(false);
+    }
   }
-  async function importFile(file?: File) { if (!file) return; const body = new FormData(); body.append('file', file); setWorking(true); setError(''); try { const result = await api.post(`/projects/${projectId}/sourcing/import`, body) as { imported: number; needs_review: number; unmatched: number; errors: string[] }; await load(); setNotice(`Импортировано: ${result.imported}. Требуют сопоставления: ${result.needs_review + result.unmatched}.${result.errors.length ? ` Ошибок: ${result.errors.length}.` : ''}`); } catch (err) { setError(errorMessage(err, 'Не удалось импортировать КП')); } finally { setWorking(false); if (fileRef.current) fileRef.current.value = ''; } }
-  async function saveMargin() { await run(() => api.patch(`/projects/${projectId}/sourcing/settings`, { target_margin_pct: Number(margin) }), 'Целевая маржа сохранена.'); }
-  async function selectOffer(offerId: string) { await run(() => api.patch(`/projects/${projectId}/sourcing/offers/${offerId}`, { is_selected: true }), 'Выбор сохранён как ручное решение.'); }
-  async function matchOffer(offerId: string, itemId: string) { if (itemId) await run(() => api.patch(`/projects/${projectId}/sourcing/offers/${offerId}`, { item_id: itemId }), 'Предложение сопоставлено с позицией.'); }
-  async function submitRfq(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = new FormData(event.currentTarget); setWorking(true); try { setRfq(await api.post(`/projects/${projectId}/sourcing/rfq-draft`, { item_ids: [], response_deadline: String(form.get('response_deadline') ?? '') || null, delivery_location: String(form.get('delivery_location') ?? '') || null, notes: String(form.get('notes') ?? '') || null }) as RfqDraft); } catch (err) { setError(errorMessage(err, 'Не удалось создать черновик')); } finally { setWorking(false); } }
+  async function addBestDiscoveryOffers() {
+    setWorking(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = (await api.post(
+        `/projects/${projectId}/sourcing/discovery-offers/best`,
+        {}
+      )) as { added: number; skipped: number; errors: string[] };
+      await load();
+      setNotice(
+        result.added
+          ? `Лучшие товары добавлены в сравнение: ${result.added}. Пропущено: ${result.skipped}.${result.errors.length ? ` Не удалось обработать: ${result.errors.length}.` : ''}`
+          : 'Новых подтверждённых товаров с опубликованной ценой не найдено.'
+      );
+    } catch (err) {
+      setError(errorMessage(err, 'Не удалось добавить лучшие товары'));
+    } finally {
+      setWorking(false);
+    }
+  }
+  async function deleteOffer() {
+    if (!offerToDelete) return;
+    const ok = await run(
+      () => api.delete(`/projects/${projectId}/sourcing/offers/${offerToDelete.id}`),
+      'Предложение удалено из сравнения.'
+    );
+    if (ok) setOfferToDelete(null);
+  }
+  async function importFile(file?: File) {
+    if (!file) return;
+    const body = new FormData();
+    body.append('file', file);
+    setWorking(true);
+    setError('');
+    try {
+      const result = (await api.post(`/projects/${projectId}/sourcing/import`, body)) as {
+        imported: number;
+        needs_review: number;
+        unmatched: number;
+        errors: string[];
+      };
+      await load();
+      setNotice(
+        `Импортировано: ${result.imported}. Требуют сопоставления: ${result.needs_review + result.unmatched}.${result.errors.length ? ` Ошибок: ${result.errors.length}.` : ''}`
+      );
+    } catch (err) {
+      setError(errorMessage(err, 'Не удалось импортировать КП'));
+    } finally {
+      setWorking(false);
+      if (fileRef.current) fileRef.current.value = '';
+    }
+  }
+  async function saveMargin() {
+    await run(
+      () =>
+        api.patch(`/projects/${projectId}/sourcing/settings`, {
+          target_margin_pct: Number(margin),
+        }),
+      'Целевая маржа сохранена.'
+    );
+  }
+  async function selectOffer(offerId: string) {
+    await run(
+      () => api.patch(`/projects/${projectId}/sourcing/offers/${offerId}`, { is_selected: true }),
+      'Выбор сохранён как ручное решение.'
+    );
+  }
+  async function matchOffer(offerId: string, itemId: string) {
+    if (itemId)
+      await run(
+        () => api.patch(`/projects/${projectId}/sourcing/offers/${offerId}`, { item_id: itemId }),
+        'Предложение сопоставлено с позицией.'
+      );
+  }
+  async function submitRfq(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setWorking(true);
+    try {
+      setRfq(
+        (await api.post(`/projects/${projectId}/sourcing/rfq-draft`, {
+          item_ids: [],
+          response_deadline: String(form.get('response_deadline') ?? '') || null,
+          delivery_location: String(form.get('delivery_location') ?? '') || null,
+          notes: String(form.get('notes') ?? '') || null,
+        })) as RfqDraft
+      );
+    } catch (err) {
+      setError(errorMessage(err, 'Не удалось создать черновик'));
+    } finally {
+      setWorking(false);
+    }
+  }
 
-  if (loading) return <div className="py-20"><Spinner label="Загрузка сравнения…" /></div>;
-  return <div className="px-4 py-stack-lg md:px-margin-page"><div className="mx-auto max-w-container-max space-y-stack-lg">
-    <div className="flex flex-wrap items-start justify-between gap-4"><div><h2 className="text-headline-lg font-headline-lg text-on-surface">Проверка товаров и поставщиков</h2><p className="mt-1 max-w-3xl text-body-md text-on-surface-variant">Проверяйте найденные по ТЗ товары, открытые источники, соответствие требованиям, стоимость, наличие и сроки.</p></div><div className="flex flex-wrap gap-2"><button className={secondaryButton} onClick={() => setModal('rfq')} disabled={!allItems.length}><span className="material-symbols-outlined text-[18px]">draft</span>Черновик RFQ</button><button className={secondaryButton} onClick={() => setModal('item')}><span className="material-symbols-outlined text-[18px]">add</span>Позиция</button><button className={primaryButton} onClick={() => setModal('offer')} disabled={!allItems.length}><span className="material-symbols-outlined text-[18px]">request_quote</span>Добавить КП</button></div></div>
-    {notice && <InfoBanner>{notice}</InfoBanner>}{error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-body-md text-red-900">{error}</div>}
-    <section className="grid gap-3 rounded-xl border border-outline-variant bg-surface/70 p-4 md:grid-cols-[1fr_auto_auto] md:items-end"><div><p className="text-label-lg font-label-lg text-on-surface">Данные и котировки</p><p className="mt-1 text-body-sm text-on-surface-variant">Система повторно прочитает последнее обработанное ТЗ, найдёт карточки товаров с фото и проверит опубликованные характеристики. CSV/XLSX используется для импорта реальных КП.</p></div><div className="flex flex-wrap gap-2"><button className={secondaryButton} onClick={() => void downloadFile(`/projects/${projectId}/sourcing/import-template`, 'supplier_quotes_template.csv')}><span className="material-symbols-outlined text-[18px]">download</span>Шаблон CSV</button><button className={secondaryButton} onClick={() => fileRef.current?.click()} disabled={working}><span className="material-symbols-outlined text-[18px]">upload_file</span>Импорт КП</button><input ref={fileRef} className="hidden" type="file" accept=".csv,.xlsx" onChange={(event) => void importFile(event.target.files?.[0])} /></div><button className={primaryButton} onClick={() => void startDiscovery()} disabled={working || searching}><span className={`material-symbols-outlined text-[18px] ${searching ? 'animate-spin' : ''}`}>{searching ? 'sync' : 'travel_explore'}</span>{searching ? 'Проверяем товары…' : allItems.length ? 'Проверить снова' : 'Проверить товары'}</button></section>
-    {data && data.summary.line_items > 0 && <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5"><div className="rounded-xl border border-outline-variant bg-surface p-4"><p className="text-label-md text-on-surface-variant">Покрыто позиций</p><p className="mt-1 text-headline-md font-headline-md">{data.summary.covered_items} / {data.summary.line_items}</p></div><div className="rounded-xl border border-outline-variant bg-surface p-4"><p className="text-label-md text-on-surface-variant">Оценочная себестоимость</p><p className="mt-1 text-headline-md font-headline-md">{money(data.summary.estimated_cost_kzt)}</p></div><div className="rounded-xl border border-outline-variant bg-surface p-4"><p className="text-label-md text-on-surface-variant">Оценочная цена заявки</p><p className="mt-1 text-headline-md font-headline-md">{money(data.summary.estimated_bid_kzt)}</p></div><div className="rounded-xl border border-outline-variant bg-surface p-4"><p className="text-label-md text-on-surface-variant">Оценочная прибыль</p><p className="mt-1 text-headline-md font-headline-md">{money(data.summary.estimated_profit_kzt)}</p></div><div className="rounded-xl border border-outline-variant bg-surface p-4"><label htmlFor="margin" className="text-label-md text-on-surface-variant">Целевая маржа, %</label><div className="mt-1 flex gap-2"><input id="margin" className={fieldClass} type="number" min="0" max="94.99" step="0.1" value={margin} onChange={(event) => setMargin(event.target.value)} /><button className={secondaryButton} onClick={() => void saveMargin()} aria-label="Сохранить маржу"><span className="material-symbols-outlined text-[18px]">check</span></button></div></div><p className="text-body-sm text-on-surface-variant sm:col-span-2 lg:col-span-5">{data.summary.caveat}</p></section>}
-    {!!data?.unmatched_offers.length && <section className="rounded-xl border border-amber-300 bg-amber-50/70 p-4"><h3 className="text-title-md font-title-md text-amber-950">Нужно проверить сопоставление ({data.unmatched_offers.length})</h3><div className="mt-3 space-y-2">{data.unmatched_offers.map((offer) => <div key={offer.id} className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-200 bg-white p-3"><div className="min-w-0 flex-1"><p className="font-medium text-on-surface">{offer.original_item_name}</p><p className="text-body-sm text-on-surface-variant">{offer.supplier_name} · {quoteMoney(offer.unit_price, offer.currency)} / {offer.original_unit ?? 'ед.'}</p></div><select className={`${fieldClass} max-w-xs`} defaultValue="" onChange={(event) => void matchOffer(offer.id, event.target.value)}><option value="" disabled>Выберите позицию ТЗ</option>{allItems.map((item) => <option key={item.id} value={item.id}>{item.product_name}</option>)}</select></div>)}</div></section>}
-    {!data?.items.length ? <EmptyState icon="inventory_2" title="Товары ещё не найдены" description="Нажмите «Проверить товары»: система прочитает обработанное ТЗ, выделит позиции и найдёт ссылки в открытых источниках." action={{ label: 'Проверить товары', onClick: startDiscovery }} /> : <div className="space-y-stack-lg">{data.items.map(({ item, offers, recommended_offer_id, selected_offer_id, selection_is_manual }) => <section key={item.id} className="overflow-hidden rounded-xl border border-outline-variant bg-surface/70"><div className="border-b border-outline-variant p-4 md:p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-title-lg font-title-lg text-on-surface">{item.product_name}</h3><p className="mt-1 text-body-md text-on-surface-variant">{quantity(item.quantity, item.unit)}{item.specs ? ` · ${item.specs}` : ''}</p>{item.source_section && <p className="mt-1 text-label-sm text-on-surface-variant">Источник: {item.source_section}</p>}</div><span className="rounded-full bg-surface-container px-3 py-1 text-label-sm text-on-surface-variant">{offers.length} КП</span></div></div><ProductDiscoveryCards productName={item.product_name} leads={item.discovery_leads} requestedQuantity={item.quantity} requestedUnit={item.unit} existingOfferUrls={offers.flatMap((row) => row.offer.source_url ? [row.offer.source_url] : [])} addingUrl={addingDiscoveryUrl} disabled={working} onAddOffer={(lead) => addDiscoveryOffer(item.id, lead)} />{offers.length ? <div className="overflow-x-auto"><table className="w-full min-w-[980px] text-left text-body-sm"><thead className="bg-surface-container-low text-label-sm text-on-surface-variant"><tr><th className="px-4 py-3">Поставщик</th><th className="px-3 py-3">Соответствие</th><th className="px-3 py-3">Цена</th><th className="px-3 py-3">Приведённая стоимость</th><th className="px-3 py-3">Условия</th><th className="px-3 py-3">Оценка</th><th className="px-4 py-3 text-right">Решение</th></tr></thead><tbody className="divide-y divide-outline-variant">{offers.map((row) => { const selected = selected_offer_id === row.offer.id; const recommended = recommended_offer_id === row.offer.id; return <tr key={row.offer.id} className={selected ? 'bg-primary/5' : ''}><td className="px-4 py-4 align-top"><p className="font-medium text-on-surface">{row.offer.supplier_name}</p><p className="mt-1 text-label-sm text-on-surface-variant">{row.offer.supplier_bin ? `БИН ${row.offer.supplier_bin}` : 'БИН не указан'}</p>{recommended && <span className="mt-2 inline-flex rounded-md bg-primary/10 px-2 py-0.5 text-label-sm text-primary">Рекомендовано</span>}{selected && selection_is_manual && <span className="ml-1 mt-2 inline-flex rounded-md bg-blue-50 px-2 py-0.5 text-label-sm text-blue-800">Выбрано вручную</span>}</td><td className="px-3 py-4 align-top"><StatusBadge status={row.offer.compliance_status} />{!!row.flags.length && <div className="mt-2 space-y-1">{row.flags.slice(0, 3).map((flag) => <p key={flag.code} className={`text-label-sm ${flag.level === 'error' ? 'text-red-700' : 'text-amber-800'}`}>• {flag.message}</p>)}{row.flags.length > 3 && <p className="text-label-sm text-on-surface-variant">+ ещё {row.flags.length - 3}</p>}</div>}</td><td className="px-3 py-4 align-top"><p className="font-medium">{new Intl.NumberFormat('ru-RU').format(Number(row.offer.unit_price))} {row.offer.currency}</p><p className="text-label-sm text-on-surface-variant">за {row.offer.price_quantity ?? 1} {row.offer.original_unit ?? 'ед.'}</p><p className="mt-1 text-label-sm text-on-surface-variant">НДС: {row.offer.vat_included === true ? 'включён' : row.offer.vat_included === false ? `${row.offer.vat_rate ?? 0}% сверху` : 'неизвестно'}</p></td><td className="px-3 py-4 align-top"><p className="font-semibold text-on-surface">{money(row.landed_cost_kzt)}</p><p className="text-label-sm text-on-surface-variant">{money(row.landed_unit_cost_kzt)} / {item.unit ?? 'ед.'}</p></td><td className="px-3 py-4 align-top text-on-surface-variant"><p>{row.offer.available_quantity != null ? `В наличии: ${row.offer.available_quantity}` : 'Наличие не подтверждено'}</p><p>{row.offer.lead_time_days != null ? `Поставка: ${row.offer.lead_time_days} дн.` : 'Срок неизвестен'}</p><p>{row.offer.warranty_months != null ? `Гарантия: ${row.offer.warranty_months} мес.` : 'Гарантия не указана'}</p></td><td className="px-3 py-4 align-top"><p className="text-title-md font-title-md">{row.score}</p><p className="text-label-sm text-on-surface-variant">из 100</p></td><td className="px-4 py-4 text-right align-top"><button className={secondaryButton} disabled={selected || working} onClick={() => void selectOffer(row.offer.id)}>{selected ? 'Выбрано' : 'Выбрать'}</button></td></tr>; })}</tbody></table></div> : <div className="p-5 text-body-md text-on-surface-variant">Нет проверяемых КП. Добавьте предложение вручную или импортируйте таблицу.</div>}</section>)}</div>}
-  </div>
+  if (loading)
+    return (
+      <div className="py-20">
+        <Spinner label="Загрузка сравнения…" />
+      </div>
+    );
+  return (
+    <div className="px-4 py-stack-lg md:px-margin-page">
+      <div className="mx-auto max-w-container-max space-y-stack-lg">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h2 className="text-headline-lg font-headline-lg text-on-surface">
+              Проверка товаров и поставщиков
+            </h2>
+            <p className="mt-1 max-w-3xl text-body-md text-on-surface-variant">
+              Проверяйте найденные по ТЗ товары, открытые источники, соответствие требованиям,
+              стоимость, наличие и сроки.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              className={secondaryButton}
+              onClick={() => setModal('rfq')}
+              disabled={!allItems.length}
+            >
+              <span className="material-symbols-outlined text-[18px]">draft</span>Черновик RFQ
+            </button>
+            <button className={secondaryButton} onClick={() => setModal('item')}>
+              <span className="material-symbols-outlined text-[18px]">add</span>Позиция
+            </button>
+            <button
+              className={primaryButton}
+              onClick={() => setModal('offer')}
+              disabled={!allItems.length}
+            >
+              <span className="material-symbols-outlined text-[18px]">request_quote</span>Добавить
+              КП
+            </button>
+          </div>
+        </div>
+        {notice && <InfoBanner>{notice}</InfoBanner>}
+        {error && (
+          <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-body-md text-red-900">
+            {error}
+          </div>
+        )}
+        <section className="grid gap-3 rounded-xl border border-outline-variant bg-surface/70 p-4 md:grid-cols-[1fr_auto] md:items-end xl:grid-cols-[1fr_auto_auto]">
+          <div>
+            <p className="text-label-lg font-label-lg text-on-surface">Данные и котировки</p>
+            <p className="mt-1 text-body-sm text-on-surface-variant">
+              Система повторно прочитает последнее обработанное ТЗ, найдёт карточки товаров с фото и
+              проверит опубликованные характеристики. CSV/XLSX используется для импорта реальных КП.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              className={secondaryButton}
+              onClick={() =>
+                void downloadFile(
+                  `/projects/${projectId}/sourcing/import-template`,
+                  'supplier_quotes_template.csv'
+                )
+              }
+            >
+              <span className="material-symbols-outlined text-[18px]">download</span>Шаблон CSV
+            </button>
+            <button
+              className={secondaryButton}
+              onClick={() => fileRef.current?.click()}
+              disabled={working}
+            >
+              <span className="material-symbols-outlined text-[18px]">upload_file</span>Импорт КП
+            </button>
+            <input
+              ref={fileRef}
+              className="hidden"
+              type="file"
+              accept=".csv,.xlsx"
+              onChange={(event) => void importFile(event.target.files?.[0])}
+            />
+          </div>
+          <div className="flex flex-wrap gap-2 md:col-span-2 xl:col-span-1">
+            <button
+              className={secondaryButton}
+              onClick={() => void addBestDiscoveryOffers()}
+              disabled={working || !hasAutoComparableProducts}
+            >
+              <span className="material-symbols-outlined text-[18px]">playlist_add_check</span>
+              Лучшие в сравнение
+            </button>
+            <button
+              className={primaryButton}
+              onClick={() => void startDiscovery()}
+              disabled={working || searching}
+            >
+              <span
+                className={`material-symbols-outlined text-[18px] ${searching ? 'animate-spin' : ''}`}
+              >
+                {searching ? 'sync' : 'travel_explore'}
+              </span>
+              {searching
+                ? 'Проверяем товары…'
+                : allItems.length
+                  ? 'Проверить снова'
+                  : 'Проверить товары'}
+            </button>
+          </div>
+        </section>
+        {data && data.summary.line_items > 0 && (
+          <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+            <div className="rounded-xl border border-outline-variant bg-surface p-4">
+              <p className="text-label-md text-on-surface-variant">Покрыто позиций</p>
+              <p className="mt-1 text-headline-md font-headline-md">
+                {data.summary.covered_items} / {data.summary.line_items}
+              </p>
+            </div>
+            <div className="rounded-xl border border-outline-variant bg-surface p-4">
+              <p className="text-label-md text-on-surface-variant">Оценочная себестоимость</p>
+              <p className="mt-1 text-headline-md font-headline-md">
+                {money(data.summary.estimated_cost_kzt)}
+              </p>
+            </div>
+            <div className="rounded-xl border border-outline-variant bg-surface p-4">
+              <p className="text-label-md text-on-surface-variant">Оценочная цена заявки</p>
+              <p className="mt-1 text-headline-md font-headline-md">
+                {money(data.summary.estimated_bid_kzt)}
+              </p>
+            </div>
+            <div className="rounded-xl border border-outline-variant bg-surface p-4">
+              <p className="text-label-md text-on-surface-variant">Оценочная прибыль</p>
+              <p className="mt-1 text-headline-md font-headline-md">
+                {money(data.summary.estimated_profit_kzt)}
+              </p>
+            </div>
+            <div className="rounded-xl border border-outline-variant bg-surface p-4">
+              <label htmlFor="margin" className="text-label-md text-on-surface-variant">
+                Целевая маржа, %
+              </label>
+              <div className="mt-1 flex gap-2">
+                <input
+                  id="margin"
+                  className={fieldClass}
+                  type="number"
+                  min="0"
+                  max="94.99"
+                  step="0.1"
+                  value={margin}
+                  onChange={(event) => setMargin(event.target.value)}
+                />
+                <button
+                  className={secondaryButton}
+                  onClick={() => void saveMargin()}
+                  aria-label="Сохранить маржу"
+                >
+                  <span className="material-symbols-outlined text-[18px]">check</span>
+                </button>
+              </div>
+            </div>
+            <p className="text-body-sm text-on-surface-variant sm:col-span-2 lg:col-span-5">
+              {data.summary.caveat}
+            </p>
+          </section>
+        )}
+        {!!data?.unmatched_offers.length && (
+          <section className="rounded-xl border border-amber-300 bg-amber-50/70 p-4">
+            <h3 className="text-title-md font-title-md text-amber-950">
+              Нужно проверить сопоставление ({data.unmatched_offers.length})
+            </h3>
+            <div className="mt-3 space-y-2">
+              {data.unmatched_offers.map((offer) => (
+                <div
+                  key={offer.id}
+                  className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-200 bg-white p-3"
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="font-medium text-on-surface">{offer.original_item_name}</p>
+                    <p className="text-body-sm text-on-surface-variant">
+                      {offer.supplier_name} · {quoteMoney(offer.unit_price, offer.currency)} /{' '}
+                      {offer.original_unit ?? 'ед.'}
+                    </p>
+                  </div>
+                  <select
+                    className={`${fieldClass} max-w-xs`}
+                    defaultValue=""
+                    onChange={(event) => void matchOffer(offer.id, event.target.value)}
+                  >
+                    <option value="" disabled>
+                      Выберите позицию ТЗ
+                    </option>
+                    {allItems.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.product_name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+        {!data?.items.length ? (
+          <EmptyState
+            icon="inventory_2"
+            title="Товары ещё не найдены"
+            description="Нажмите «Проверить товары»: система прочитает обработанное ТЗ, выделит позиции и найдёт ссылки в открытых источниках."
+            action={{ label: 'Проверить товары', onClick: startDiscovery }}
+          />
+        ) : (
+          <div className="space-y-stack-lg">
+            {data.items.map(
+              ({ item, offers, recommended_offer_id, selected_offer_id, selection_is_manual }) => (
+                <section
+                  key={item.id}
+                  className="overflow-hidden rounded-xl border border-outline-variant bg-surface/70"
+                >
+                  <div className="border-b border-outline-variant p-4 md:p-5">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <h3 className="text-title-lg font-title-lg text-on-surface">
+                          {item.product_name}
+                        </h3>
+                        <p className="mt-1 text-body-md text-on-surface-variant">
+                          {quantity(item.quantity, item.unit)}
+                          {item.specs ? ` · ${item.specs}` : ''}
+                        </p>
+                        {item.source_section && (
+                          <p className="mt-1 text-label-sm text-on-surface-variant">
+                            Источник: {item.source_section}
+                          </p>
+                        )}
+                      </div>
+                      <span className="rounded-full bg-surface-container px-3 py-1 text-label-sm text-on-surface-variant">
+                        {offers.length} КП
+                      </span>
+                    </div>
+                  </div>
+                  <ProductDiscoveryCards
+                    productName={item.product_name}
+                    leads={item.discovery_leads}
+                    requestedQuantity={item.quantity}
+                    requestedUnit={item.unit}
+                    existingOfferUrls={offers.flatMap((row) =>
+                      row.offer.source_url ? [row.offer.source_url] : []
+                    )}
+                    addingUrl={addingDiscoveryUrl}
+                    disabled={working}
+                    onAddOffer={(lead) => addDiscoveryOffer(item.id, lead)}
+                  />
+                  {offers.length ? (
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[980px] text-left text-body-sm">
+                        <thead className="bg-surface-container-low text-label-sm text-on-surface-variant">
+                          <tr>
+                            <th className="px-4 py-3">Поставщик</th>
+                            <th className="px-3 py-3">Соответствие</th>
+                            <th className="px-3 py-3">Цена</th>
+                            <th className="px-3 py-3">Приведённая стоимость</th>
+                            <th className="px-3 py-3">Условия</th>
+                            <th className="px-3 py-3">Оценка</th>
+                            <th className="px-4 py-3 text-right">Решение</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-outline-variant">
+                          {offers.map((row) => {
+                            const selected = selected_offer_id === row.offer.id;
+                            const recommended = recommended_offer_id === row.offer.id;
+                            return (
+                              <tr key={row.offer.id} className={selected ? 'bg-primary/5' : ''}>
+                                <td className="px-4 py-4 align-top">
+                                  <p className="font-medium text-on-surface">
+                                    {row.offer.supplier_name}
+                                  </p>
+                                  <p className="mt-1 text-label-sm text-on-surface-variant">
+                                    {row.offer.supplier_bin
+                                      ? `БИН ${row.offer.supplier_bin}`
+                                      : 'БИН не указан'}
+                                  </p>
+                                  {recommended && (
+                                    <span className="mt-2 inline-flex rounded-md bg-primary/10 px-2 py-0.5 text-label-sm text-primary">
+                                      Рекомендовано
+                                    </span>
+                                  )}
+                                  {selected && selection_is_manual && (
+                                    <span className="ml-1 mt-2 inline-flex rounded-md bg-blue-50 px-2 py-0.5 text-label-sm text-blue-800">
+                                      Выбрано вручную
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="px-3 py-4 align-top">
+                                  <StatusBadge status={row.offer.compliance_status} />
+                                  {!!row.flags.length && (
+                                    <div className="mt-2 space-y-1">
+                                      {row.flags.slice(0, 3).map((flag) => (
+                                        <p
+                                          key={flag.code}
+                                          className={`text-label-sm ${flag.level === 'error' ? 'text-red-700' : 'text-amber-800'}`}
+                                        >
+                                          • {flag.message}
+                                        </p>
+                                      ))}
+                                      {row.flags.length > 3 && (
+                                        <p className="text-label-sm text-on-surface-variant">
+                                          + ещё {row.flags.length - 3}
+                                        </p>
+                                      )}
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="px-3 py-4 align-top">
+                                  <p className="font-medium">
+                                    {new Intl.NumberFormat('ru-RU').format(
+                                      Number(row.offer.unit_price)
+                                    )}{' '}
+                                    {row.offer.currency}
+                                  </p>
+                                  <p className="text-label-sm text-on-surface-variant">
+                                    за {row.offer.price_quantity ?? 1}{' '}
+                                    {row.offer.original_unit ?? 'ед.'}
+                                  </p>
+                                  <p className="mt-1 text-label-sm text-on-surface-variant">
+                                    НДС:{' '}
+                                    {row.offer.vat_included === true
+                                      ? 'включён'
+                                      : row.offer.vat_included === false
+                                        ? `${row.offer.vat_rate ?? 0}% сверху`
+                                        : 'неизвестно'}
+                                  </p>
+                                </td>
+                                <td className="px-3 py-4 align-top">
+                                  <p className="font-semibold text-on-surface">
+                                    {money(row.landed_cost_kzt)}
+                                  </p>
+                                  <p className="text-label-sm text-on-surface-variant">
+                                    {money(row.landed_unit_cost_kzt)} / {item.unit ?? 'ед.'}
+                                  </p>
+                                </td>
+                                <td className="px-3 py-4 align-top text-on-surface-variant">
+                                  <p>
+                                    {row.offer.available_quantity != null
+                                      ? `В наличии: ${row.offer.available_quantity}`
+                                      : 'Наличие не подтверждено'}
+                                  </p>
+                                  <p>
+                                    {row.offer.lead_time_days != null
+                                      ? `Поставка: ${row.offer.lead_time_days} дн.`
+                                      : 'Срок неизвестен'}
+                                  </p>
+                                  <p>
+                                    {row.offer.warranty_months != null
+                                      ? `Гарантия: ${row.offer.warranty_months} мес.`
+                                      : 'Гарантия не указана'}
+                                  </p>
+                                </td>
+                                <td className="px-3 py-4 align-top">
+                                  <p className="text-title-md font-title-md">{row.score}</p>
+                                  <p className="text-label-sm text-on-surface-variant">из 100</p>
+                                </td>
+                                <td className="px-4 py-4 align-top">
+                                  <div className="flex flex-col items-stretch gap-2">
+                                    <button
+                                      className={secondaryButton}
+                                      disabled={selected || working}
+                                      onClick={() => void selectOffer(row.offer.id)}
+                                    >
+                                      {selected ? 'Выбрано' : 'Выбрать'}
+                                    </button>
+                                    {row.offer.source_url && (
+                                      <a
+                                        href={row.offer.source_url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-center text-label-sm text-primary hover:underline"
+                                      >
+                                        Источник ↗
+                                      </a>
+                                    )}
+                                    <button
+                                      type="button"
+                                      className="text-label-sm text-rose-700 hover:underline disabled:opacity-50"
+                                      disabled={working}
+                                      onClick={() => setOfferToDelete(row.offer)}
+                                    >
+                                      Удалить
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="p-5 text-body-md text-on-surface-variant">
+                      Нет проверяемых КП. Добавьте предложение вручную или импортируйте таблицу.
+                    </div>
+                  )}
+                </section>
+              )
+            )}
+          </div>
+        )}
+      </div>
 
-  {modal === 'item' && <Modal title="Добавить позицию тендера" onClose={() => setModal(null)}><form className="space-y-4" onSubmit={submitItem}><label className="block text-label-md">Наименование<input name="product_name" className={`${fieldClass} mt-1`} required maxLength={500} /></label><div className="grid gap-3 sm:grid-cols-2"><label className="block text-label-md">Количество<input name="quantity" className={`${fieldClass} mt-1`} type="number" min="0.0001" step="any" /></label><label className="block text-label-md">Единица<input name="unit" className={`${fieldClass} mt-1`} placeholder="шт, кг, м²…" /></label></div><label className="block text-label-md">Характеристики<textarea name="specs" className={`${fieldClass} mt-1 min-h-24`} /></label><div className="flex justify-end gap-2"><button type="button" className={secondaryButton} onClick={() => setModal(null)}>Отмена</button><button className={primaryButton} disabled={working}>Добавить</button></div></form></Modal>}
-  {modal === 'offer' && <Modal title="Добавить предложение поставщика" onClose={() => setModal(null)}><form className="space-y-4" onSubmit={submitOffer}><div className="grid gap-3 sm:grid-cols-2"><label className="block text-label-md">Позиция ТЗ<select name="item_id" className={`${fieldClass} mt-1`} required>{allItems.map((item) => <option key={item.id} value={item.id}>{item.product_name}</option>)}</select></label><label className="block text-label-md">Наименование в КП<input name="original_item_name" className={`${fieldClass} mt-1`} required defaultValue={allItems[0]?.product_name} /></label><label className="block text-label-md">Поставщик<input name="supplier_name" className={`${fieldClass} mt-1`} required /></label><label className="block text-label-md">БИН<input name="supplier_bin" className={`${fieldClass} mt-1`} inputMode="numeric" pattern="[0-9]{12}" /></label><label className="block text-label-md">Контакт<input name="supplier_contact" className={`${fieldClass} mt-1`} /></label><label className="block text-label-md">Единица в КП<input name="original_unit" className={`${fieldClass} mt-1`} required defaultValue={allItems[0]?.unit ?? ''} /></label><label className="block text-label-md">Цена<input name="unit_price" className={`${fieldClass} mt-1`} type="number" min="0" step="any" required /></label><label className="block text-label-md">Цена указана за<input name="price_quantity" className={`${fieldClass} mt-1`} type="number" min="0.0001" step="any" defaultValue="1" /></label><label className="block text-label-md">Валюта<select name="currency" className={`${fieldClass} mt-1`} defaultValue="KZT"><option>KZT</option><option>USD</option><option>EUR</option><option>RUB</option><option>CNY</option></select></label><label className="block text-label-md">Курс к KZT<input name="exchange_rate_to_kzt" className={`${fieldClass} mt-1`} type="number" min="0.000001" step="any" /></label><label className="block text-label-md">НДС<select name="vat_included" className={`${fieldClass} mt-1`} defaultValue=""><option value="">Неизвестно</option><option value="true">Включён</option><option value="false">Не включён</option></select></label><label className="block text-label-md">Ставка НДС, %<input name="vat_rate" className={`${fieldClass} mt-1`} type="number" min="0" max="100" step="0.01" /></label><label className="block text-label-md">Предложено, ед.<input name="quoted_quantity" className={`${fieldClass} mt-1`} type="number" min="0" step="any" /></label><label className="block text-label-md">Доступно, ед.<input name="available_quantity" className={`${fieldClass} mt-1`} type="number" min="0" step="any" /></label><label className="block text-label-md">MOQ<input name="moq" className={`${fieldClass} mt-1`} type="number" min="0" step="any" /></label><label className="block text-label-md">Доставка<input name="delivery_cost" className={`${fieldClass} mt-1`} type="number" min="0" step="any" /></label><label className="block text-label-md">Срок, дней<input name="lead_time_days" className={`${fieldClass} mt-1`} type="number" min="0" /></label><label className="block text-label-md">Гарантия, мес.<input name="warranty_months" className={`${fieldClass} mt-1`} type="number" min="0" /></label><label className="block text-label-md">Соответствие<select name="compliance_status" className={`${fieldClass} mt-1`} defaultValue="unknown"><option value="unknown">Не проверено</option><option value="compliant">Соответствует</option><option value="partial">Частично</option><option value="noncompliant">Не соответствует</option></select></label><label className="block text-label-md">Дата КП<input name="quote_date" className={`${fieldClass} mt-1`} type="date" /></label><label className="block text-label-md">Действительно до<input name="valid_until" className={`${fieldClass} mt-1`} type="date" /></label><label className="block text-label-md">Сертификаты<input name="certificates" className={`${fieldClass} mt-1`} placeholder="через точку с запятой" /></label></div><label className="block text-label-md">Комментарий по соответствию<textarea name="compliance_notes" className={`${fieldClass} mt-1 min-h-20`} /></label><label className="block text-label-md">Ссылка на источник<input name="source_url" className={`${fieldClass} mt-1`} type="url" /></label><div className="flex justify-end gap-2"><button type="button" className={secondaryButton} onClick={() => setModal(null)}>Отмена</button><button className={primaryButton} disabled={working}>Сохранить КП</button></div></form></Modal>}
-  {modal === 'rfq' && <Modal title="Черновик запроса котировок" onClose={() => { setModal(null); setRfq(null); }}>{rfq ? <div className="space-y-4"><InfoBanner>{rfq.disclaimer}</InfoBanner><label className="block text-label-md">Тема<input className={`${fieldClass} mt-1`} value={rfq.subject} readOnly /></label><label className="block text-label-md">Текст<textarea className={`${fieldClass} mt-1 min-h-80 font-mono text-sm`} value={rfq.body} readOnly /></label><button className={primaryButton} onClick={() => void navigator.clipboard.writeText(`${rfq.subject}\n\n${rfq.body}`)}><span className="material-symbols-outlined text-[18px]">content_copy</span>Копировать</button></div> : <form className="space-y-4" onSubmit={submitRfq}><label className="block text-label-md">Ответ до<input name="response_deadline" className={`${fieldClass} mt-1`} type="date" /></label><label className="block text-label-md">Место поставки<input name="delivery_location" className={`${fieldClass} mt-1`} /></label><label className="block text-label-md">Дополнительные условия<textarea name="notes" className={`${fieldClass} mt-1 min-h-24`} /></label><p className="text-body-sm text-on-surface-variant">Система сформирует текст, но ничего не отправит поставщикам.</p><div className="flex justify-end gap-2"><button type="button" className={secondaryButton} onClick={() => setModal(null)}>Отмена</button><button className={primaryButton} disabled={working}>Сформировать</button></div></form>}</Modal>}
-  </div>;
+      {modal === 'item' && (
+        <Modal title="Добавить позицию тендера" onClose={() => setModal(null)}>
+          <form className="space-y-4" onSubmit={submitItem}>
+            <label className="block text-label-md">
+              Наименование
+              <input
+                name="product_name"
+                className={`${fieldClass} mt-1`}
+                required
+                maxLength={500}
+              />
+            </label>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="block text-label-md">
+                Количество
+                <input
+                  name="quantity"
+                  className={`${fieldClass} mt-1`}
+                  type="number"
+                  min="0.0001"
+                  step="any"
+                />
+              </label>
+              <label className="block text-label-md">
+                Единица
+                <input name="unit" className={`${fieldClass} mt-1`} placeholder="шт, кг, м²…" />
+              </label>
+            </div>
+            <label className="block text-label-md">
+              Характеристики
+              <textarea name="specs" className={`${fieldClass} mt-1 min-h-24`} />
+            </label>
+            <div className="flex justify-end gap-2">
+              <button type="button" className={secondaryButton} onClick={() => setModal(null)}>
+                Отмена
+              </button>
+              <button className={primaryButton} disabled={working}>
+                Добавить
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+      {modal === 'offer' && (
+        <Modal title="Добавить предложение поставщика" onClose={() => setModal(null)}>
+          <form className="space-y-4" onSubmit={submitOffer}>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="block text-label-md">
+                Позиция ТЗ
+                <select name="item_id" className={`${fieldClass} mt-1`} required>
+                  {allItems.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.product_name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block text-label-md">
+                Наименование в КП
+                <input
+                  name="original_item_name"
+                  className={`${fieldClass} mt-1`}
+                  required
+                  defaultValue={allItems[0]?.product_name}
+                />
+              </label>
+              <label className="block text-label-md">
+                Поставщик
+                <input name="supplier_name" className={`${fieldClass} mt-1`} required />
+              </label>
+              <label className="block text-label-md">
+                БИН
+                <input
+                  name="supplier_bin"
+                  className={`${fieldClass} mt-1`}
+                  inputMode="numeric"
+                  pattern="[0-9]{12}"
+                />
+              </label>
+              <label className="block text-label-md">
+                Контакт
+                <input name="supplier_contact" className={`${fieldClass} mt-1`} />
+              </label>
+              <label className="block text-label-md">
+                Единица в КП
+                <input
+                  name="original_unit"
+                  className={`${fieldClass} mt-1`}
+                  required
+                  defaultValue={allItems[0]?.unit ?? ''}
+                />
+              </label>
+              <label className="block text-label-md">
+                Цена
+                <input
+                  name="unit_price"
+                  className={`${fieldClass} mt-1`}
+                  type="number"
+                  min="0"
+                  step="any"
+                  required
+                />
+              </label>
+              <label className="block text-label-md">
+                Цена указана за
+                <input
+                  name="price_quantity"
+                  className={`${fieldClass} mt-1`}
+                  type="number"
+                  min="0.0001"
+                  step="any"
+                  defaultValue="1"
+                />
+              </label>
+              <label className="block text-label-md">
+                Валюта
+                <select name="currency" className={`${fieldClass} mt-1`} defaultValue="KZT">
+                  <option>KZT</option>
+                  <option>USD</option>
+                  <option>EUR</option>
+                  <option>RUB</option>
+                  <option>CNY</option>
+                </select>
+              </label>
+              <label className="block text-label-md">
+                Курс к KZT
+                <input
+                  name="exchange_rate_to_kzt"
+                  className={`${fieldClass} mt-1`}
+                  type="number"
+                  min="0.000001"
+                  step="any"
+                />
+              </label>
+              <label className="block text-label-md">
+                НДС
+                <select name="vat_included" className={`${fieldClass} mt-1`} defaultValue="">
+                  <option value="">Неизвестно</option>
+                  <option value="true">Включён</option>
+                  <option value="false">Не включён</option>
+                </select>
+              </label>
+              <label className="block text-label-md">
+                Ставка НДС, %
+                <input
+                  name="vat_rate"
+                  className={`${fieldClass} mt-1`}
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="0.01"
+                />
+              </label>
+              <label className="block text-label-md">
+                Предложено, ед.
+                <input
+                  name="quoted_quantity"
+                  className={`${fieldClass} mt-1`}
+                  type="number"
+                  min="0"
+                  step="any"
+                />
+              </label>
+              <label className="block text-label-md">
+                Доступно, ед.
+                <input
+                  name="available_quantity"
+                  className={`${fieldClass} mt-1`}
+                  type="number"
+                  min="0"
+                  step="any"
+                />
+              </label>
+              <label className="block text-label-md">
+                MOQ
+                <input
+                  name="moq"
+                  className={`${fieldClass} mt-1`}
+                  type="number"
+                  min="0"
+                  step="any"
+                />
+              </label>
+              <label className="block text-label-md">
+                Доставка
+                <input
+                  name="delivery_cost"
+                  className={`${fieldClass} mt-1`}
+                  type="number"
+                  min="0"
+                  step="any"
+                />
+              </label>
+              <label className="block text-label-md">
+                Срок, дней
+                <input
+                  name="lead_time_days"
+                  className={`${fieldClass} mt-1`}
+                  type="number"
+                  min="0"
+                />
+              </label>
+              <label className="block text-label-md">
+                Гарантия, мес.
+                <input
+                  name="warranty_months"
+                  className={`${fieldClass} mt-1`}
+                  type="number"
+                  min="0"
+                />
+              </label>
+              <label className="block text-label-md">
+                Соответствие
+                <select
+                  name="compliance_status"
+                  className={`${fieldClass} mt-1`}
+                  defaultValue="unknown"
+                >
+                  <option value="unknown">Не проверено</option>
+                  <option value="compliant">Соответствует</option>
+                  <option value="partial">Частично</option>
+                  <option value="noncompliant">Не соответствует</option>
+                </select>
+              </label>
+              <label className="block text-label-md">
+                Дата КП
+                <input name="quote_date" className={`${fieldClass} mt-1`} type="date" />
+              </label>
+              <label className="block text-label-md">
+                Действительно до
+                <input name="valid_until" className={`${fieldClass} mt-1`} type="date" />
+              </label>
+              <label className="block text-label-md">
+                Сертификаты
+                <input
+                  name="certificates"
+                  className={`${fieldClass} mt-1`}
+                  placeholder="через точку с запятой"
+                />
+              </label>
+            </div>
+            <label className="block text-label-md">
+              Комментарий по соответствию
+              <textarea name="compliance_notes" className={`${fieldClass} mt-1 min-h-20`} />
+            </label>
+            <label className="block text-label-md">
+              Ссылка на источник
+              <input name="source_url" className={`${fieldClass} mt-1`} type="url" />
+            </label>
+            <div className="flex justify-end gap-2">
+              <button type="button" className={secondaryButton} onClick={() => setModal(null)}>
+                Отмена
+              </button>
+              <button className={primaryButton} disabled={working}>
+                Сохранить КП
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+      {modal === 'rfq' && (
+        <Modal
+          title="Черновик запроса котировок"
+          onClose={() => {
+            setModal(null);
+            setRfq(null);
+          }}
+        >
+          {rfq ? (
+            <div className="space-y-4">
+              <InfoBanner>{rfq.disclaimer}</InfoBanner>
+              <label className="block text-label-md">
+                Тема
+                <input className={`${fieldClass} mt-1`} value={rfq.subject} readOnly />
+              </label>
+              <label className="block text-label-md">
+                Текст
+                <textarea
+                  className={`${fieldClass} mt-1 min-h-80 font-mono text-sm`}
+                  value={rfq.body}
+                  readOnly
+                />
+              </label>
+              <button
+                className={primaryButton}
+                onClick={() => void navigator.clipboard.writeText(`${rfq.subject}\n\n${rfq.body}`)}
+              >
+                <span className="material-symbols-outlined text-[18px]">content_copy</span>
+                Копировать
+              </button>
+            </div>
+          ) : (
+            <form className="space-y-4" onSubmit={submitRfq}>
+              <label className="block text-label-md">
+                Ответ до
+                <input name="response_deadline" className={`${fieldClass} mt-1`} type="date" />
+              </label>
+              <label className="block text-label-md">
+                Место поставки
+                <input name="delivery_location" className={`${fieldClass} mt-1`} />
+              </label>
+              <label className="block text-label-md">
+                Дополнительные условия
+                <textarea name="notes" className={`${fieldClass} mt-1 min-h-24`} />
+              </label>
+              <p className="text-body-sm text-on-surface-variant">
+                Система сформирует текст, но ничего не отправит поставщикам.
+              </p>
+              <div className="flex justify-end gap-2">
+                <button type="button" className={secondaryButton} onClick={() => setModal(null)}>
+                  Отмена
+                </button>
+                <button className={primaryButton} disabled={working}>
+                  Сформировать
+                </button>
+              </div>
+            </form>
+          )}
+        </Modal>
+      )}
+      {offerToDelete && (
+        <Modal title="Удалить предложение?" onClose={() => setOfferToDelete(null)}>
+          <div className="space-y-5">
+            <p className="text-body-md text-on-surface-variant">
+              «{offerToDelete.original_item_name}» от {offerToDelete.supplier_name} будет удалён из
+              сравнения. Карточка найденного товара останется доступна, и её можно будет добавить
+              снова.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                className={secondaryButton}
+                disabled={working}
+                onClick={() => setOfferToDelete(null)}
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                className="inline-flex items-center justify-center gap-2 rounded-lg bg-rose-700 px-4 py-2 text-label-md font-label-md text-white hover:bg-rose-800 disabled:opacity-50"
+                disabled={working}
+                onClick={() => void deleteOffer()}
+              >
+                <span className="material-symbols-outlined text-[18px]">delete</span>
+                Удалить
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
 }
