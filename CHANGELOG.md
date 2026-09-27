@@ -8,6 +8,8 @@
 - Saved evidence and product-search results without retaining uploaded PDF files.
 - Background item-by-item product checks that continue after the browser closes and can resume safely.
 - CSV exports and owner-scoped report deletion.
+- Automatic supplier comparison from discovered product offers, including the best-option recommendation.
+- Vendor product photos and richer public-page evidence on product cards.
 
 ### Changed
 
