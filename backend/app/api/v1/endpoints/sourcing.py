@@ -1,6 +1,7 @@
 import io
 import uuid
 from decimal import Decimal
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from fastapi.responses import StreamingResponse
@@ -14,6 +15,7 @@ from app.db.models.project import Project
 from app.db.models.sourcing import SourcingPlan, SupplierOffer
 from app.db.models.user import User
 from app.schemas.sourcing import (
+    DiscoveryOfferCreate,
     QuoteImportResult,
     RfqDraftRequest,
     RfqDraftResponse,
@@ -37,6 +39,34 @@ from app.services.sourcing import (
 
 router = APIRouter()
 MAX_QUOTE_FILE_BYTES = 5 * 1024 * 1024
+
+
+def _discovery_compliance_notes(lead: dict) -> str | None:
+    labels = {"matched": "подтверждено", "mismatch": "расхождение", "unknown": "нет данных"}
+    notes: list[str] = []
+    for check in lead.get("checks") or []:
+        if not isinstance(check, dict):
+            continue
+        requirement = str(check.get("requirement") or "").strip()
+        if not requirement:
+            continue
+        status = labels.get(str(check.get("status") or ""), "не проверено")
+        evidence = str(check.get("evidence") or "").strip()
+        notes.append(f"{requirement}: {status}" + (f" — {evidence}" if evidence else ""))
+    text = "\n".join(notes)
+    return text[:5000] or None
+
+
+def _verified_discovery_lead(item: ProductSearchItem, source_url: str) -> dict | None:
+    for result in item.results or []:
+        if (
+            isinstance(result, dict)
+            and result.get("url") == source_url
+            and result.get("is_product_page") is True
+            and result.get("page_verified") is True
+        ):
+            return result
+    return None
 
 
 async def _project_or_404(db: AsyncSession, project_id: uuid.UUID, user: User) -> Project:
@@ -209,6 +239,82 @@ async def create_supplier_offer(
         source_type="manual",
         match_status=match_status,
         match_confidence=confidence,
+    )
+    db.add(offer)
+    await db.flush()
+    return offer
+
+
+@router.post(
+    "/{project_id}/sourcing/items/{item_id}/offers/from-discovery",
+    response_model=SupplierOfferResponse,
+    status_code=201,
+)
+async def create_offer_from_discovery(
+    project_id: uuid.UUID,
+    item_id: uuid.UUID,
+    payload: DiscoveryOfferCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    await _project_or_404(db, project_id, current_user)
+    item = await _item_or_404(db, project_id, current_user.company_id, item_id)
+    lead = _verified_discovery_lead(item, payload.source_url)
+    if not lead:
+        raise HTTPException(status_code=422, detail="Выберите проверенную карточку товара из результатов поиска")
+    if lead.get("price") is None:
+        raise HTTPException(status_code=422, detail="На странице товара не опубликована цена")
+
+    duplicate_stmt = select(SupplierOffer).where(
+        SupplierOffer.project_id == project_id,
+        SupplierOffer.company_id == current_user.company_id,
+        SupplierOffer.item_id == item.id,
+        SupplierOffer.source_url == payload.source_url,
+    )
+    if (await db.execute(duplicate_stmt)).scalars().first():
+        raise HTTPException(status_code=409, detail="Этот товар уже добавлен в сравнение")
+
+    match_status = str(lead.get("match_status") or "unknown")
+    compliance_status = {
+        "matched": "compliant",
+        "partial": "partial",
+        "mismatch": "noncompliant",
+    }.get(match_status, "unknown")
+    characteristics = {
+        str(key)[:200]: str(value)[:1000]
+        for key, value in (lead.get("characteristics") or {}).items()
+    } if isinstance(lead.get("characteristics"), dict) else {}
+    host = urlsplit(payload.source_url).hostname or "Открытый источник"
+
+    try:
+        offer_payload = SupplierOfferCreate(
+            item_id=item.id,
+            supplier_name=str(lead.get("shop") or host)[:500],
+            original_item_name=str(lead.get("title") or item.product_name)[:500],
+            original_unit=item.unit,
+            unit_price=lead["price"],
+            price_quantity=1,
+            currency=str(lead.get("currency") or "KZT"),
+            available_quantity=lead.get("stock_quantity"),
+            characteristics=characteristics,
+            compliance_status=compliance_status,
+            compliance_notes=_discovery_compliance_notes(lead),
+            source_url=payload.source_url,
+        )
+    except (ValidationError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail="Данные карточки товара нельзя добавить в сравнение") from exc
+
+    offer = SupplierOffer(
+        **offer_payload.model_dump(exclude={"item_id"}),
+        project_id=project_id,
+        company_id=current_user.company_id,
+        item_id=item.id,
+        created_by=current_user.id,
+        normalized_item_name=normalize_name(offer_payload.original_item_name),
+        normalized_unit=normalize_unit(offer_payload.original_unit),
+        source_type="discovery",
+        match_status="matched",
+        match_confidence=Decimal("1"),
     )
     db.add(offer)
     await db.flush()
