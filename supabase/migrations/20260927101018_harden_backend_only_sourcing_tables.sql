@@ -1,0 +1,3 @@
+-- Historical production migration marker.
+-- Server-only RLS hardening for every application table is consolidated in
+-- 20260927102715_harden_public_server_only.sql.

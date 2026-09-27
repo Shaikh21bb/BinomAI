@@ -1,0 +1,3 @@
+-- Historical production migration marker.
+-- The complete idempotent supplier-sourcing schema is kept in
+-- 20260927102706_supplier_sourcing.sql for reproducible fresh databases.
