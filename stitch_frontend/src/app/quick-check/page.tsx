@@ -26,6 +26,7 @@ interface ParsedPdf {
   created_at: string;
   updated_at: string;
   processing_state: 'pending' | 'queued' | 'running' | 'completed' | 'error';
+  reused?: boolean;
 }
 
 interface CheckItem extends PdfItem {
@@ -106,6 +107,8 @@ export default function QuickCheckPage() {
   const [dragging, setDragging] = useState(false);
   const [phase, setPhase] = useState<'idle' | 'parsing' | 'searching' | 'done'>('idle');
   const [parsed, setParsed] = useState<ParsedPdf | null>(null);
+  const [reusedReport, setReusedReport] = useState(false);
+  const [rerunningReport, setRerunningReport] = useState(false);
   const [items, setItems] = useState<CheckItem[]>([]);
   const [error, setError] = useState('');
   const [history, setHistory] = useState<SavedCheck[]>([]);
@@ -115,7 +118,7 @@ export default function QuickCheckPage() {
   const [historyError, setHistoryError] = useState('');
   const [loadingReport, setLoadingReport] = useState(false);
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
-  const busy = phase === 'parsing' || (phase === 'searching' && !['queued', 'running'].includes(parsed?.processing_state ?? ''));
+  const busy = rerunningReport || phase === 'parsing' || (phase === 'searching' && !['queued', 'running'].includes(parsed?.processing_state ?? ''));
   const completed = items.filter((item) => item.state === 'ready').length;
   const activeReportId = parsed?.id;
   const activeReportState = parsed?.processing_state;
@@ -196,6 +199,7 @@ export default function QuickCheckPage() {
     try {
       const document: ParsedPdf = await api.get(`/quick-check/reports/${id}`);
       setParsed(document);
+      setReusedReport(false);
       setItems(document.items.map((item) => ({ ...item, results: item.results ?? [] })));
       setPhase(['queued', 'running'].includes(document.processing_state) ? 'searching' : 'done');
     } catch (loadError) {
@@ -214,6 +218,7 @@ export default function QuickCheckPage() {
       await api.delete(`/quick-check/reports/${report.id}`);
       if (parsed?.id === report.id) {
         setParsed(null);
+        setReusedReport(false);
         setItems([]);
         setPhase('idle');
       }
@@ -287,6 +292,25 @@ export default function QuickCheckPage() {
     }
   }
 
+  async function rerunReport(report: ParsedPdf) {
+    if (busy || ['queued', 'running'].includes(report.processing_state)) return;
+    setRerunningReport(true);
+    setError('');
+    try {
+      const updated: ParsedPdf = await api.post(`/quick-check/reports/${report.id}/rerun`, {});
+      setParsed(updated);
+      setReusedReport(false);
+      setItems(updated.items.map((item) => ({ ...item, results: item.results ?? [] })));
+      setPhase(['queued', 'running'].includes(updated.processing_state) ? 'searching' : 'done');
+      if (updated.processing_state === 'error') setError('Новая проверка сохранена, но поиск пока недоступен. Его можно возобновить позже.');
+      await refreshHistory();
+    } catch (rerunError) {
+      setError(errorMessage(rerunError, 'Не удалось запустить новую проверку'));
+    } finally {
+      setRerunningReport(false);
+    }
+  }
+
   async function start(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!file || busy) return;
@@ -301,6 +325,7 @@ export default function QuickCheckPage() {
 
     setError('');
     setParsed(null);
+    setReusedReport(false);
     setItems([]);
     setPhase('parsing');
     try {
@@ -308,6 +333,7 @@ export default function QuickCheckPage() {
       form.append('file', file);
       const document: ParsedPdf = await api.post('/quick-check/parse', form);
       setParsed(document);
+      setReusedReport(Boolean(document.reused));
       setItems(document.items.map((item) => ({ ...item, results: item.results ?? [] })));
       setPhase(['queued', 'running'].includes(document.processing_state) ? 'searching' : 'done');
       if (document.processing_state === 'error') setError('PDF сохранён, но фоновый поиск пока недоступен. Запустите его из сохранённой проверки.');
@@ -337,7 +363,7 @@ export default function QuickCheckPage() {
               <span className="material-symbols-outlined text-[16px]">arrow_back</span>Рабочий стол
             </Link>
             <h1 className="text-display font-display tracking-tight text-on-surface">Быстрая проверка товаров</h1>
-            <p className="mt-2 max-w-2xl text-body-lg text-on-surface-variant">Загрузите техспецификацию в PDF. Мы выделим товары, найдём их фото и проверим опубликованные характеристики — без создания тендера. Результат сохранится в вашей истории.</p>
+            <p className="mt-2 max-w-2xl text-body-lg text-on-surface-variant">Загрузите техспецификацию в PDF. Мы выделим товары, найдём их фото и проверим опубликованные характеристики — без создания тендера. Повторная загрузка того же файла откроет сохранённый результат сразу.</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1.5 text-label-sm text-primary"><span className="material-symbols-outlined text-[17px]">bolt</span>Отдельная проверка</span>
@@ -421,9 +447,11 @@ export default function QuickCheckPage() {
               <div className="flex flex-wrap items-center gap-2">
                 <span aria-live="polite" className="rounded-full bg-primary/10 px-3 py-1.5 text-label-sm text-primary">Проверено {completed} из {items.length}</span>
                 {items.some((item) => item.state !== 'ready') && (!activeSearch || staleSearch) && <button type="button" disabled={busy} onClick={() => void checkRemaining(parsed)} className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-label-sm text-on-primary hover:opacity-90 disabled:opacity-50"><span className="material-symbols-outlined text-[17px]">travel_explore</span>{staleSearch ? 'Возобновить проверку' : 'Проверить оставшиеся'}</button>}
+                {!activeSearch && <button type="button" disabled={busy} onClick={() => void rerunReport(parsed)} className="inline-flex items-center gap-1.5 rounded-lg border border-primary px-3 py-1.5 text-label-sm text-primary hover:bg-primary/5 disabled:opacity-50"><span className="material-symbols-outlined text-[17px]">refresh</span>{rerunningReport ? 'Запускаем…' : 'Проверить заново'}</button>}
                 <button type="button" onClick={() => downloadReport(parsed, items)} className="inline-flex items-center gap-1.5 rounded-lg border border-outline-variant px-3 py-1.5 text-label-sm text-on-surface hover:border-primary"><span className="material-symbols-outlined text-[17px]">download</span>Скачать отчёт CSV</button>
               </div>
             </div>
+            {reusedReport && <p role="status" className="rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-body-sm text-on-surface">Этот PDF уже есть в истории: открыта проверка от {formatDate(parsed.created_at)} без повторной обработки файла. {activeSearch ? 'Поиск ещё идёт в фоне.' : 'Для свежих данных нажмите «Проверить заново» — предыдущий результат останется в истории.'}</p>}
             {activeSearch && !staleSearch && <p role="status" className="rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-body-sm text-on-surface">Поиск идёт в фоне. Можно закрыть страницу: готовые товары сохраняются, а прогресс виден здесь и в истории.</p>}
             {staleSearch && <p role="status" className="rounded-xl bg-amber-50 px-4 py-3 text-body-sm text-amber-900">Прогресс давно не обновлялся. Нажмите «Возобновить проверку», чтобы продолжить с сохранённого места.</p>}
             {parsed.processing_state === 'error' && <p role="alert" className="rounded-xl bg-error-container px-4 py-3 text-body-sm text-on-error-container">Поиск прервался. Уже найденные товары сохранены; нажмите «Проверить оставшиеся», чтобы продолжить.</p>}

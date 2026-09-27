@@ -1,5 +1,6 @@
 """The quick PDF flow must work without creating a project or tender."""
 
+import hashlib
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
@@ -54,8 +55,42 @@ async def test_quick_parse_extracts_items_without_tender(authenticated_user, mon
     saved = authenticated_user[1].add.call_args.args[0]
     assert saved.items[0]["state"] == "pending"
     assert saved.items[0]["results"] == []
+    assert saved.pdf_sha256 == hashlib.sha256(b"%PDF-test").hexdigest()
     assert not hasattr(saved, "pdf_bytes")
     authenticated_user[1].commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reupload_same_pdf_opens_saved_report_without_ocr_or_search(authenticated_user, monkeypatch):
+    user, db = authenticated_user
+    contents = b"%PDF-same-document"
+    existing = QuickCheckReport(
+        id=uuid.uuid4(), company_id=user.company_id, created_by=user.id,
+        filename="original.pdf", page_count=2, ocr_pages=0, total_items=1,
+        truncated=False, processing_state="completed", pdf_sha256=hashlib.sha256(contents).hexdigest(),
+        items=[{"product_name": "Средство для посуды", "state": "ready", "results": [{"title": "Найдено"}]}],
+    )
+    db.execute.return_value = scalar_first(existing)
+    parser = MagicMock(side_effect=AssertionError("Duplicate PDF must not be parsed again"))
+    published = MagicMock()
+    monkeypatch.setattr(quick_check.DocumentParser, "get_page_count", parser)
+    monkeypatch.setattr(quick_check.search_quick_report_task, "delay", published)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/quick-check/parse",
+            files={"file": ("renamed.pdf", contents, "application/pdf")},
+        )
+    assert response.status_code == 200
+    assert response.json()["id"] == str(existing.id)
+    assert response.json()["reused"] is True
+    assert response.json()["items"][0]["results"] == [{"title": "Найдено"}]
+    parser.assert_not_called()
+    published.assert_not_called()
+    db.add.assert_not_called()
+    params = db.execute.call_args.args[0].compile().params.values()
+    assert user.company_id in params
+    assert user.id in params
+    assert existing.pdf_sha256 in params
 
 
 @pytest.mark.asyncio
@@ -268,6 +303,56 @@ async def test_saved_report_can_resume_without_reupload(authenticated_user, monk
     params = db.execute.call_args.args[0].compile().params.values()
     assert user.company_id in params
     assert user.id in params
+
+
+@pytest.mark.asyncio
+async def test_rerun_creates_new_history_entry_without_reupload(authenticated_user, monkeypatch):
+    user, db = authenticated_user
+    original = QuickCheckReport(
+        id=uuid.uuid4(), company_id=user.company_id, created_by=user.id,
+        filename="techspec.pdf", page_count=2, ocr_pages=1, total_items=1,
+        truncated=False, processing_state="completed", pdf_sha256="a" * 64,
+        items=[{"product_name": "Средство для посуды", "specs": "500 мл", "quantity": 12,
+                "unit": "шт", "state": "ready", "results": [{"title": "Старая цена"}],
+                "checked_at": "2026-09-01T00:00:00Z"}],
+    )
+    db.execute.return_value = scalar_first(original)
+    published = []
+    monkeypatch.setattr(quick_check.search_quick_report_task, "delay", lambda *args: published.append(args))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(f"/api/v1/quick-check/reports/{original.id}/rerun")
+    assert response.status_code == 200
+    new_report = db.add.call_args.args[0]
+    assert response.json()["id"] == str(new_report.id)
+    assert new_report.id != original.id
+    assert new_report.pdf_sha256 == original.pdf_sha256
+    assert new_report.items == [{"product_name": "Средство для посуды", "specs": "500 мл",
+                                 "quantity": 12, "unit": "шт", "state": "pending", "results": [],
+                                 "checked_at": None}]
+    assert original.items[0]["results"] == [{"title": "Старая цена"}]
+    assert published == [(str(new_report.id), str(new_report.run_id))]
+    params = db.execute.call_args.args[0].compile().params.values()
+    assert user.company_id in params
+    assert user.id in params
+
+
+@pytest.mark.asyncio
+async def test_rerun_rejects_active_report(authenticated_user, monkeypatch):
+    user, db = authenticated_user
+    report = QuickCheckReport(
+        id=uuid.uuid4(), company_id=user.company_id, created_by=user.id,
+        filename="techspec.pdf", page_count=1, ocr_pages=0, total_items=1,
+        truncated=False, processing_state="running",
+        items=[{"product_name": "Средство для посуды", "state": "searching", "results": []}],
+    )
+    db.execute.return_value = scalar_first(report)
+    published = MagicMock()
+    monkeypatch.setattr(quick_check.search_quick_report_task, "delay", published)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(f"/api/v1/quick-check/reports/{report.id}/rerun")
+    assert response.status_code == 409
+    db.add.assert_not_called()
+    published.assert_not_called()
 
 
 @pytest.mark.asyncio

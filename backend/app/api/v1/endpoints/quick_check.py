@@ -3,6 +3,7 @@
 import base64
 import binascii
 from datetime import datetime, timedelta, timezone
+import hashlib
 import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
@@ -61,6 +62,30 @@ def _report_payload(report: QuickCheckReport) -> dict:
         "created_at": report.created_at,
         "updated_at": report.updated_at,
     }
+
+
+async def _queue_report(db: AsyncSession, report: QuickCheckReport) -> dict:
+    """Make the report visible to the worker before publishing its task."""
+    await db.commit()
+    try:
+        search_quick_report_task.delay(str(report.id), str(report.run_id))
+    except Exception:
+        report.processing_state = "error"
+        await db.commit()
+    return _report_payload(report)
+
+
+def _fresh_items(items: list[dict]) -> list[dict]:
+    product_fields = ("product_name", "specs", "quantity", "unit", "source_section")
+    return [
+        {
+            **{key: item[key] for key in product_fields if key in item},
+            "state": "pending",
+            "results": [],
+            "checked_at": None,
+        }
+        for item in items
+    ]
 
 
 def _encode_cursor(created_at: datetime, report_id: uuid.UUID) -> str:
@@ -176,13 +201,41 @@ async def run_quick_report(
         return _report_payload(report)
     report.run_id = uuid.uuid4()
     report.processing_state = "queued"
-    await db.commit()
-    try:
-        search_quick_report_task.delay(str(report.id), str(report.run_id))
-    except Exception:
-        report.processing_state = "error"
-        await db.commit()
-    return _report_payload(report)
+    return await _queue_report(db, report)
+
+
+@router.post("/reports/{report_id}/rerun")
+async def rerun_quick_report(
+    report_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    cache: redis.Redis = Depends(get_redis),
+    db: AsyncSession = Depends(get_db),
+):
+    """Start a fresh search from saved PDF positions, preserving the old result."""
+    await enforce_rate_limit(
+        cache, scope="quick-check-rerun", subject=str(user.id), rate=settings.RATE_LIMIT_AI_OPS,
+    )
+    original = await _report_or_404(db, report_id, user)
+    if original.processing_state in {"queued", "running"}:
+        raise HTTPException(status_code=409, detail="Дождитесь завершения текущей проверки.")
+    if not original.items:
+        raise HTTPException(status_code=422, detail="В сохранённой проверке нет позиций товаров.")
+    report = QuickCheckReport(
+        id=uuid.uuid4(),
+        company_id=user.company_id,
+        created_by=user.id,
+        filename=original.filename,
+        page_count=original.page_count,
+        ocr_pages=original.ocr_pages,
+        total_items=original.total_items,
+        truncated=original.truncated,
+        items=_fresh_items(original.items),
+        processing_state="queued",
+        run_id=uuid.uuid4(),
+        pdf_sha256=original.pdf_sha256,
+    )
+    db.add(report)
+    return await _queue_report(db, report)
 
 
 @router.delete("/reports/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -221,6 +274,20 @@ async def parse_quick_pdf(
     if not contents.startswith(b"%PDF-"):
         raise HTTPException(status_code=415, detail="Файл не является корректным PDF.")
 
+    pdf_sha256 = hashlib.sha256(contents).hexdigest()
+    existing = (await db.execute(
+        select(QuickCheckReport)
+        .where(
+            QuickCheckReport.company_id == user.company_id,
+            QuickCheckReport.created_by == user.id,
+            QuickCheckReport.pdf_sha256 == pdf_sha256,
+        )
+        .order_by(QuickCheckReport.created_at.desc(), QuickCheckReport.id.desc())
+        .limit(1)
+    )).scalars().first()
+    if existing is not None:
+        return {**_report_payload(existing), "reused": True}
+
     pages = await run_in_threadpool(DocumentParser.get_page_count, contents, "application/pdf")
     if pages is None:
         raise HTTPException(status_code=422, detail="Не удалось прочитать PDF.")
@@ -251,19 +318,13 @@ async def parse_quick_pdf(
         ocr_pages=ocr_pages,
         total_items=len(products),
         truncated=len(products) > _MAX_ITEMS,
-        items=[{**item, "state": "pending", "results": [], "checked_at": None}
-               for item in jsonable_encoder(products[:_MAX_ITEMS])],
+        items=_fresh_items(jsonable_encoder(products[:_MAX_ITEMS])),
         processing_state="queued",
         run_id=uuid.uuid4(),
+        pdf_sha256=pdf_sha256,
     )
     db.add(report)
-    await db.commit()
-    try:
-        search_quick_report_task.delay(str(report.id), str(report.run_id))
-    except Exception:
-        report.processing_state = "error"
-        await db.commit()
-    return _report_payload(report)
+    return await _queue_report(db, report)
 
 
 @router.post("/search")

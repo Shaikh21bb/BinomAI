@@ -14,8 +14,8 @@
 
 **Казахстан • Строительство • AI**
 
-[![Status](https://img.shields.io/badge/Status-Planning%20%2F%20Documentation-blue?style=for-the-badge)](/)
-[![Phase](https://img.shields.io/badge/Phase-1%20of%204-orange?style=for-the-badge)](/)
+[![Status](https://img.shields.io/badge/Status-Production-success?style=for-the-badge)](https://binom-ai-vprod.vercel.app)
+[![Release](https://img.shields.io/badge/Release-v1.3.0-blue?style=for-the-badge)](https://github.com/Shaikh21bb/BinomAI/releases)
 [![Market](https://img.shields.io/badge/Market-Kazakhstan-green?style=for-the-badge)](/)
 [![Stack](https://img.shields.io/badge/Stack-Next.js%20%7C%20FastAPI%20%7C%20Supabase%20%7C%20AI-purple?style=for-the-badge)](/)
 
@@ -42,15 +42,17 @@
 - ✉️ **Создаёт** Сопроводительное письмо
 - 📥 **Экспортирует** финальные документы в DOCX / PDF
 
+Отдельный сценарий **Quick Check** извлекает позиции из PDF, ищет публичные предложения поставщиков, сопоставляет характеристики и остатки, сохраняет приватную историю проверок и позволяет повторить поиск без повторной загрузки документа.
+
 ---
 
 ## Текущий статус проекта
 
 | Фаза | Название | Статус |
 |------|----------|--------|
-| 🔵 **Фаза 0** | Документация и проектирование | 🟡 **В процессе** |
-| ⚪ **Фаза 1** | MVP — Core Features | ⏳ Запланировано |
-| ⚪ **Фаза 2** | Beta — Расширенный AI | ⏳ Запланировано |
+| ✅ **Фаза 0** | Документация и проектирование | ✅ Завершено |
+| ✅ **Фаза 1** | MVP — Core Features | 🚀 В production |
+| 🔵 **Фаза 2** | Beta — Расширенный AI | 🟡 В развитии |
 | ⚪ **Фаза 3** | Launch — Коммерческий запуск | ⏳ Запланировано |
 
 ---
@@ -73,9 +75,9 @@
 ### Frontend
 | Технология | Версия | Назначение |
 |-----------|--------|------------|
-| Next.js | 14+ | React-фреймворк, App Router, SSR |
+| Next.js | 16.3 | React-фреймворк, App Router, SSR |
 | TypeScript | 5+ | Типизация |
-| Tailwind CSS | 3+ | Стилизация |
+| Tailwind CSS | 4 | Стилизация |
 
 ### Backend
 | Технология | Версия | Назначение |
@@ -133,15 +135,12 @@
 │   └── Knowledge Base.md                 ← База знаний
 │
 ├── 📁 05_Development/                    ← Разработка
+│   ├── Deployment.md                     ← Production-развёртывание
 │   ├── Sprint 1.md                       ← Спринт 1: Фундамент
 │   ├── Sprint 2.md                       ← Спринт 2: AI Core
-│   └── Sprint 3.md                       ← Спринт 3: Документогенерация
-│
-├── 📁 06_Testing/                        ← Тестирование
+│   ├── Sprint 3.md                       ← Спринт 3: Документогенерация
+│   ├── Supplier Sourcing.md              ← Поиск и сравнение поставщиков
 │   └── Test Plan.md                      ← План тестирования
-│
-└── 📁 07_Deployment/                     ← Деплой
-    └── Deployment.md                     ← Инструкция развёртывания
 ```
 
 ---
@@ -163,8 +162,8 @@ AI не заменяет специалиста — он усиливает ег
 ### 5. Scalable Architecture
 Архитектура рассчитана на рост: от 1 компании до тысяч организаций.
 
-### 6. Zero Frontend Changes
-Frontend зафиксирован. Вся архитектурная работа ведётся на уровне backend, AI и API.
+### 6. Consistent Product Experience
+Frontend, backend и API развиваются вместе, а пользовательские сценарии остаются доступными, предсказуемыми и устойчивыми к ошибкам.
 
 ---
 
@@ -176,7 +175,7 @@ Frontend зафиксирован. Вся архитектурная работ�
 | **Product Manager** | PRD, Roadmap, User Stories, Acceptance Criteria |
 | **AI Engineer** | LLM-интеграция, агенты, промпты, RAG |
 | **Backend Engineer** | FastAPI, Supabase, очереди, API |
-| **Frontend Engineer** | Next.js (интерфейс уже готов, только интеграция) |
+| **Frontend Engineer** | Next.js, доступность, интеграция с API и пользовательские сценарии |
 | **QA Engineer** | Test Plan, E2E тесты, QA |
 | **DevOps** | Docker, CI/CD, деплой, мониторинг |
 
@@ -198,26 +197,25 @@ Frontend зафиксирован. Вся архитектурная работ�
 | 10 | `Design System.md` | ✅ **Готово** | 2026-07-09 |
 | 11 | `UI Components.md` | ✅ **Готово** | 2026-07-09 |
 | 12 | `UX Flow.md` | ✅ **Готово** | 2026-07-09 |
-| 13 | `Prompt Library.md` | ⏳ Ожидает | — |
-| 14 | `AI Agents.md` | ⏳ Ожидает | — |
-| 15 | `Knowledge Base.md` | ⏳ Ожидает | — |
-| 16 | `Sprint 1.md` | ⏳ Ожидает | — |
-| 17 | `Sprint 2.md` | ⏳ Ожидает | — |
-| 18 | `Sprint 3.md` | ⏳ Ожидает | — |
-| 19 | `Test Plan.md` | ⏳ Ожидает | — |
-| 20 | `Deployment.md` | ⏳ Ожидает | — |
+| 13 | `Prompt Library.md` | ✅ **Готово** | 2026-07-09 |
+| 14 | `AI Agents.md` | ✅ **Готово** | 2026-07-09 |
+| 15 | `Knowledge Base.md` | ✅ **Готово** | 2026-07-09 |
+| 16 | `Sprint 1.md` | ✅ **Готово** | 2026-07-09 |
+| 17 | `Sprint 2.md` | ✅ **Готово** | 2026-07-09 |
+| 18 | `Sprint 3.md` | ✅ **Готово** | 2026-07-09 |
+| 19 | `Test Plan.md` | ✅ **Готово** | 2026-07-09 |
+| 20 | `Deployment.md` | ✅ **Актуально** | 2026-09-27 |
+| 21 | `Supplier Sourcing.md` | ✅ **Актуально** | 2026-09-27 |
 
 ---
 
 ## Правила проекта
 
-> ⚠️ **ВАЖНО: Разработка кода запрещена до полного завершения документации.**
-
-1. Каждый документ должен быть **полностью завершён** перед переходом к следующему
-2. Каждое архитектурное решение должно **соответствовать существующему Frontend**
-3. Frontend **не изменяется** — только интеграция через API
-4. Все решения должны быть **масштабируемыми** и готовы к production
-5. Документы пишутся на уровне **Senior Product Team**
+1. Изменения сопровождаются тестами и актуальной документацией.
+2. Доступ к данным всегда ограничивается пользователем и компанией.
+3. Загруженные для Quick Check PDF не сохраняются; хранится только криптографический отпечаток и результат обработки.
+4. Миграции базы данных остаются обратимо-безопасными и проходят предварительную проверку.
+5. Production-релиз выполняется только после backend-, frontend- и browser-проверок.
 
 ---
 
@@ -238,13 +236,17 @@ Frontend зафиксирован. Вся архитектурная работ�
 *Powered by Gemini · OpenAI · Next.js · FastAPI · Supabase*
 
 </div>
+
 ## Деплой (Production)
+
+- Frontend: [binom-ai-vprod.vercel.app](https://binom-ai-vprod.vercel.app)
+- Backend health: [binom-backend.onrender.com/api/v1/health/live](https://binom-backend.onrender.com/api/v1/health/live)
 
 ### Backend — Render (blueprint)
 
 1. На [render.com](https://render.com) нажмите **New → Blueprint** и укажите репозиторий `Shaikh21bb/BinomAI`.
-2. Render автоматически создаст 4 сервиса: `binom-backend` (FastAPI), `binom-worker` (Celery), `binom-gotenberg`, `binom-redis`.
-3. Заполните переменные окружения со значением `sync: false` (во вкладке **Environment** каждого сервиса):
+2. Blueprint создаст один бесплатный web-сервис `binom-backend`. В контейнере совместно запускаются FastAPI, локальный Redis и Celery worker с beat.
+3. Заполните переменные окружения со значением `sync: false` во вкладке **Environment** сервиса:
 
 | Переменная | Значение |
 |---|---|
@@ -258,7 +260,7 @@ Frontend зафиксирован. Вся архитектурная работ�
 | `PRIMARY_LLM_MODEL` / `FALLBACK_LLM_MODEL` | модели |
 
 4. В `CORS_ORIGINS` замените `https://<your-app>.vercel.app` на реальный домен Vercel.
-5. Supabase-миграции из `supabase/migrations/` выполните в SQL Editor (если ещё не выполнялись).
+5. Примените миграции из `supabase/migrations/` командой `npx supabase db push --linked --include-all` или через SQL Editor.
 
 > Бесплатный тариф Render «засыпает» сервисы после 15 минут простоя — первый запрос будет медленным.
 

@@ -19,7 +19,15 @@ class QuickCheckReport(Base):
             "processing_state IN ('pending', 'queued', 'running', 'completed', 'error')",
             name="quick_check_reports_processing_state_check",
         ),
+        CheckConstraint(
+            "pdf_sha256 IS NULL OR pdf_sha256 ~ '^[0-9a-f]{64}$'",
+            name="quick_check_reports_pdf_sha256_check",
+        ),
         Index("idx_quick_check_reports_owner_created", "created_by", "created_at"),
+        Index(
+            "idx_quick_check_reports_owner_pdf_created", "created_by", "pdf_sha256", "created_at",
+            postgresql_where=text("pdf_sha256 IS NOT NULL"),
+        ),
     )
 
     company_id: Mapped[uuid.UUID] = mapped_column(
@@ -36,3 +44,4 @@ class QuickCheckReport(Base):
     items: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
     processing_state: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default=text("'pending'"))
     run_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    pdf_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)

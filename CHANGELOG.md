@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.0 — 2026-09-27
+
+### Added
+
+- SHA-256 PDF fingerprinting that reuses the newest matching Quick Check report without retaining the uploaded file.
+- Fresh Quick Check reruns from saved positions while preserving previous reports in history.
+- Accessible loading, route-not-found, segment-error, and global-error screens for the Next.js application.
+
+### Changed
+
+- Updated project status and deployment documentation to match the live production architecture.
+
+### Verification
+
+- Backend tests, frontend lint, TypeScript checks, production build, and Supabase migration dry run pass.
+
 ## 1.2.0 — 2026-09-27
 
 ### Added
