@@ -1,7 +1,5 @@
 import uuid
-from datetime import datetime
-from typing import Optional, List
-from pydantic import BaseModel
+from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,7 +20,6 @@ async def notify_company(
     link_url: Optional[str] = None,
 ) -> int:
     """Create an in-app notification for every active member of the company."""
-    from app.db.models.user import User
 
     stmt = select(User.id).where(User.company_id == company_id, User.is_active.is_(True))
     user_ids = (await db.execute(stmt)).scalars().all()

@@ -1,11 +1,9 @@
 import re
 import structlog
-from typing import Optional
 from app.ai.llm_client import call_llm
 from app.ai.prompt_manager import get_analysis_prompt, TENDER_ANALYSIS_SYSTEM_PROMPT
 from app.schemas.analysis import TenderAnalysisOutput, Requirement, Risk, KeyDeadline, MissingInfo
 from app.core.supabase import supabase_admin
-from app.core.config import settings
 
 logger = structlog.get_logger(__name__)
 
@@ -49,7 +47,7 @@ class AnalysisAgent:
         for m in list(re.finditer(r'\b(\d{2})[.\-](\d{2})[.\-](\d{4})\b', sample))[:5]:
             deadlines.append(
                 KeyDeadline(
-                    event=f"Дата из документа (дд.мм.гггг)",
+                    event="Дата из документа (дд.мм.гггг)",
                     date=f"{m.group(1)}.{m.group(2)}.{m.group(3)}",
                     is_hard_deadline=False,
                 )

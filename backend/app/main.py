@@ -43,7 +43,7 @@ async def _run_light_migrations() -> None:
 async def _ensure_db_schema() -> None:
     from app.db.base import Base
     from app.db.session import engine
-    import app.db.models  # ensure all models are registered
+    import app.db.models  # noqa: F401  # register every model before create_all
 
     last_error: Exception | None = None
     for attempt in range(1, DB_SCHEMA_RETRIES + 1):
@@ -63,7 +63,7 @@ REQUIRED_STORAGE_BUCKETS = [
     settings.STORAGE_BUCKET_TENDER_DOCS,
     settings.STORAGE_BUCKET_COMPANY_ASSETS,
     settings.STORAGE_BUCKET_EXPORTS,
-    "extracted-texts",
+    settings.STORAGE_BUCKET_EXTRACTED_TEXT,
 ]
 
 async def ensure_storage_buckets() -> None:
@@ -107,12 +107,15 @@ def create_app() -> FastAPI:
     FastAPI application factory.
     """
     # Initialize structured logging
-    setup_logging(is_production=(settings.APP_ENV == "production"))
+    is_production = settings.APP_ENV.casefold() in {"prod", "production"}
+    setup_logging(is_production=is_production)
     
     app = FastAPI(
         title=settings.APP_NAME,
         version=settings.APP_VERSION,
-        openapi_url="/api/v1/openapi.json",
+        openapi_url=None if is_production else "/api/v1/openapi.json",
+        docs_url=None if is_production else "/docs",
+        redoc_url=None if is_production else "/redoc",
         lifespan=lifespan,
     )
 

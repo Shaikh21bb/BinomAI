@@ -1,9 +1,8 @@
 import uuid
 import secrets
 from datetime import datetime, timedelta, timezone
-import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -12,6 +11,7 @@ from app.api.deps import get_db, get_current_user, security
 from app.core.config import settings
 from app.core.plans import get_plan
 from app.core.security import verify_jwt_token
+from app.core.supabase import create_supabase_http_client, supabase_auth_errors
 from app.db.models.user import User
 from app.db.models.company import Company
 from app.db.models.project import Project
@@ -155,7 +155,7 @@ async def change_my_password(
     creds: HTTPAuthorizationCredentials = Depends(security),
 ):
     """Verify the current password and change it via Supabase GoTrue."""
-    async with httpx.AsyncClient() as client:
+    async with supabase_auth_errors(), create_supabase_http_client() as client:
         # 1. Verify current credentials via GoTrue token endpoint
         verify_response = await client.post(
             f"{settings.SUPABASE_URL}/auth/v1/token?grant_type=password",

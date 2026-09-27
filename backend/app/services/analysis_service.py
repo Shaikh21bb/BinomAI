@@ -1,8 +1,7 @@
 import uuid
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, text
-from app.db.models.project import Project
+from sqlalchemy import text
 from app.schemas.analysis import TenderAnalysisOutput
 # Note: Assuming AnalysisResult model is created in app.db.models.analysis
 # Wait, let's create the AnalysisResult model dynamically if not exists, 

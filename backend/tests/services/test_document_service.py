@@ -3,7 +3,6 @@ from unittest.mock import AsyncMock
 from fastapi import UploadFile
 from app.services.document_service import DocumentService
 from fastapi.exceptions import HTTPException
-import uuid
 
 @pytest.mark.asyncio
 async def test_validate_file_size_exceeded():

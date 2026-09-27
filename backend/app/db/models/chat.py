@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 import uuid
 from sqlalchemy import String, Text, Boolean, Integer, ForeignKey, JSON
 from sqlalchemy.orm import Mapped, mapped_column

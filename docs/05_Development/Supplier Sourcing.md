@@ -4,11 +4,21 @@
 
 The sourcing workspace extends the existing project-level product extraction flow. `product_search_items` remain the tender line items produced from the latest processed specification, while `supplier_offers` store user-entered or imported commercial offers. Re-running extraction preserves existing line-item IDs and linked offers.
 
-Web search results are discovery leads only. They are not treated as verified supplier quotes and never participate in price totals or recommendations. The application does not send RFQs or place orders; it only prepares a draft that a user can review and copy.
+When an uploaded PDF or DOCX reaches `ready`, the document worker automatically queues both tender analysis and product discovery. Kazakhstan technical specifications represented as repeated label/value fields are supported in Russian and Kazakh; when both language versions are present, the Russian section is used as the canonical copy to avoid duplicate line items. The Products / Снабжение page keeps polling while extracted items are still being searched.
+
+Web search first opens concrete public product pages and reads their Product JSON-LD, published description, characteristics, photo and price. Category/search pages remain secondary links. Each product card compares every extracted technical requirement with source evidence and distinguishes full evidence, partial evidence, conflicts and unknown facts. A bounded AI pass may resolve semantic descriptions, but only when its quoted evidence occurs in the source page; unavailable AI leaves conservative deterministic results. Published product data still needs user confirmation and never becomes a supplier quote or enters price totals or recommendations. The application does not send RFQs or place orders; it only prepares a draft that a user can review and copy.
+
+## Quick PDF check
+
+The dashboard's **Быстро проверить PDF** button opens `/quick-check`, a stateless flow that does not create a tender or save the uploaded PDF. `POST /api/v1/quick-check/parse` validates a PDF (20 MB / 60 pages), keeps native text where available, and uses local Poppler/Tesseract OCR only for pages without a meaningful text layer (at most 12 scanned pages and 90 seconds per request). OCR supports Russian, Kazakh, and English, reports how many pages it processed, and asks users to verify recognized values. It extracts up to 20 product positions and their requested quantities. The client displays those positions immediately, then calls `POST /api/v1/quick-check/search` for each one to reuse public-page discovery and requirement-by-requirement matching. Both routes require authentication. Results remain in the page session only; reloading requires a new upload. The OCR binaries and language data are installed in both backend Docker images.
+
+The client checks two positions at a time and can retry a single position without re-uploading the PDF. Product cards compare an explicitly published stock count against the requested quantity only when their units are compatible; otherwise sufficiency remains unknown. The PDF view summarizes enough, shortage, and unconfirmed-stock candidate counts separately from specification compliance.
+
+A card shows an exact stock count only when the product page publishes one (for example Product JSON-LD `inventoryLevel` or an explicit stock line). An `InStock` flag without a number is displayed as availability with unknown quantity, never as a fabricated count.
 
 ## Data entry
 
-- Manual tender item and supplier-offer entry is available in the project’s **Products / Снабжение** tab.
+- Manual tender item and supplier-offer entry is available in the project’s **Товары** tab.
 - CSV and XLSX imports accept up to 1,000 rows and 5 MB. Download the in-product CSV template for canonical columns. The same template is checked in as [`supplier_quotes_template.csv`](supplier_quotes_template.csv) for development and onboarding use.
 - Russian and English column aliases are supported. Required values are supplier name, item name, and unit price.
 - Ambiguous name matches are held for human review. Imported source names and units are retained alongside normalized values.

@@ -1,11 +1,11 @@
 import re
-import json
 import asyncio
 import structlog
 import httpx
 from typing import List, Dict, Any, Optional
 
 from app.core.config import settings
+from app.services.product_pages import fetch_product_page
 
 logger = structlog.get_logger(__name__)
 
@@ -24,8 +24,7 @@ async def search_products(query: str, region: Optional[str] = None) -> List[Dict
     """
     Search the web for a product by name + specs, optionally scoped to a region.
     Priority: Google CSE (if configured) -> DuckDuckGo -> marketplace links fallback.
-    Returns a list of matches:
-      {title, price, currency, shop, city, url, image_url, snippet}
+    Product pages are read for characteristics and a real product photo.
     """
     results: List[Dict[str, Any]] = []
 
@@ -35,22 +34,49 @@ async def search_products(query: str, region: Optional[str] = None) -> List[Dict
 
     try:
         if settings.GOOGLE_CSE_API_KEY and settings.GOOGLE_CSE_ID:
-            results = await _google_cse(q, region)
-            if results:
-                return await _enrich_images(results[:10])
+            google_results = await _google_cse(q, region)
+            if google_results:
+                results = await enrich_product_pages(google_results[:8])
+                if sum(bool(row.get("is_product_page")) for row in results) >= 6:
+                    return results
     except Exception as e:
         logger.warning("google_cse_search_failed", error=str(e)[:200])
 
     try:
         ddg = await _duckduckgo(query, region)
-        results = [r for r in ddg if _looks_like_price(r) or _looks_like_product_page(r) or _relevant_result(r, query)]
-        if len(results) >= 2:
-            return await _enrich_images(results[:10])
+        filtered = [r for r in ddg if _looks_like_price(r) or _looks_like_product_page(r) or _relevant_result(r, query)]
+        if filtered:
+            enriched = await enrich_product_pages(filtered[:8])
+            results = _unique_results(results + enriched)
+            if sum(bool(row.get("is_product_page")) for row in results) >= 6:
+                return results
     except Exception as e:
         logger.warning("duckduckgo_search_failed", error=str(e)[:200])
 
-    # Last resort: guaranteed-available marketplace search links
-    return _marketplace_links(query, region)
+    # Long tender prose can make generic web search return categories. A short
+    # marketplace product-page query gives concrete items to inspect.
+    try:
+        marketplace_query = re.sub(r"моющее средство для посуды", "средство для мытья посуды", query, flags=re.I)
+        targeted = await _duckduckgo(f"{marketplace_query.split(';')[0][:85]} site:kaspi.kz/shop/p/", None)
+        concrete_urls = [row for row in targeted if "/shop/p/" in (row.get("url") or "")]
+        candidates = await enrich_product_pages(concrete_urls[:6])
+        results = _unique_results(candidates + results)
+    except Exception as e:
+        logger.warning("targeted_product_search_failed", error_type=type(e).__name__)
+
+    # Search pages remain discoverable links, not concrete product cards.
+    return results[:12] if any(row.get("is_product_page") for row in results) else results[:10] + _marketplace_links(query, region)
+
+
+def _unique_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen: set[str] = set()
+    unique = []
+    for row in results:
+        url = row.get("url") or ""
+        if url and url not in seen:
+            seen.add(url)
+            unique.append(row)
+    return unique
 
 
 async def _google_cse(q: str, region: Optional[str]) -> List[Dict[str, Any]]:
@@ -72,14 +98,6 @@ async def _google_cse(q: str, region: Optional[str]) -> List[Dict[str, Any]]:
         title = it.get("title", "")
         snippet = it.get("snippet", "")
         link = it.get("link", "")
-        page_map = it.get("pagemap", {})
-        img = None
-        if page_map:
-            for kind in ("cse_image", "imageobject", "thumbnail"):
-                arr = page_map.get(kind) or []
-                if arr and arr[0].get("src"):
-                    img = arr[0]["src"]
-                    break
         price = _extract_price(f"{title} {snippet}")
         out.append({
             "title": title,
@@ -89,13 +107,12 @@ async def _google_cse(q: str, region: Optional[str]) -> List[Dict[str, Any]]:
             "shop": _shop_from_url(link),
             "city": region,
             "url": link,
-            "image_url": img,
+            "image_url": None,
         })
     return out
 
 
 async def _duckduckgo(query: str, region: Optional[str]) -> List[Dict[str, Any]]:
-    import html as html_mod
 
     q = query
     if region:
@@ -144,46 +161,26 @@ def _decode_ddg_url(href: str) -> str:
     return href
 
 
-async def _enrich_images(results: List[Dict[str, Any]], limit: int = 6) -> List[Dict[str, Any]]:
-    """Fetch og:image for results that lack a product image (top N, in parallel)."""
-    from urllib.parse import urljoin, urlparse
+async def enrich_product_pages(results: List[Dict[str, Any]], limit: int = 8) -> List[Dict[str, Any]]:
+    """Read bounded public pages; only the item's own page can supply its photo."""
+    semaphore = asyncio.Semaphore(4)
 
-    to_fetch = [r for r in results if not r.get("image_url") and r.get("url")][:limit]
+    async with httpx.AsyncClient(timeout=8.0, headers={"User-Agent": "Mozilla/5.0 (compatible; BinomProductResearch/1.0)"}) as client:
+        async def enrich(result: Dict[str, Any]) -> None:
+            async with semaphore:
+                page = await fetch_product_page(result.get("url") or "", client)
+                result.update(page)
+                if page.get("is_product_page") and page.get("page_verified"):
+                    result["title"] = page.get("title") or result.get("title")
+                    result["image_url"] = page.get("image_url")
+                    result["price"] = page.get("price")
+                    result["currency"] = page.get("currency")
+                else:
+                    result["image_url"] = None
+                    result["price"] = None
+                    result["currency"] = None
 
-    async def fetch_one(r: Dict[str, Any]) -> Optional[str]:
-        url = r["url"]
-        try:
-            async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
-                resp = await client.get(url)
-                if resp.status_code != 200:
-                    return None
-                text = resp.text[:400_000]
-        except Exception:
-            return None
-        for pat in (
-            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
-            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
-            r'<meta[^>]+property=["\']og:image:url["\'][^>]+content=["\']([^"\']+)["\']',
-        ):
-            m = re.search(pat, text, re.IGNORECASE)
-            if m and not m.group(1).startswith("data:"):
-                return urljoin(url, m.group(1).strip())
-        m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', text, re.IGNORECASE)
-        if m and not m.group(1).startswith("data:"):
-            return urljoin(url, m.group(1).strip())
-        return None
-
-    async def favicon_of(r: Dict[str, Any]) -> Optional[str]:
-        try:
-            host = urlparse(r["url"]).netloc
-            return f"https://www.google.com/s2/favicons?domain={host}&sz=128"
-        except Exception:
-            return None
-
-    images = await asyncio.gather(*(fetch_one(r) for r in to_fetch))
-    favicons = await asyncio.gather(*(favicon_of(r) for r in to_fetch))
-    for r, img, fav in zip(to_fetch, images, favicons):
-        r["image_url"] = img or fav
+        await asyncio.gather(*(enrich(result) for result in results[:limit]))
     return results
 
 
@@ -201,6 +198,8 @@ def _marketplace_links(query: str, region: Optional[str]) -> List[Dict[str, Any]
             "city": region,
             "url": url,
             "image_url": None,
+            "is_product_page": False,
+            "page_verified": False,
         })
     return results
 

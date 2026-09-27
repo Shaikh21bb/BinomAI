@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import patch
 from app.schemas.analysis import TenderAnalysisOutput
 from app.ai.llm_client import call_llm, GeminiRequiredError, AIServiceUnavailableError
 from app.core.config import settings

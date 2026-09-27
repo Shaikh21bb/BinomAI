@@ -1,7 +1,7 @@
 import pytest
 import uuid
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 from httpx import ASGITransport, AsyncClient
 from app.main import app
 from app.api.deps import get_db, get_current_user
@@ -272,7 +272,7 @@ async def test_update_project_foreign_company_404(client, mock_project_repo):
 
 @pytest.mark.asyncio
 async def test_download_document_returns_signed_url(client, mock_project_repo):
-    from tests.conftest import db_dispatch, scalar_first
+    from tests.conftest import db_dispatch
     from app.db.models.document import Document
 
     doc = Document(

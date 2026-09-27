@@ -1,11 +1,9 @@
-from datetime import datetime, timedelta
-from typing import Any, Union
 import jwt
-from passlib.context import CryptContext
 from fastapi import HTTPException, status
 import structlog
 
 from app.core.config import settings
+from app.core.tls import create_tls_context
 
 logger = structlog.get_logger(__name__)
 
@@ -16,7 +14,10 @@ def _get_jwks_client() -> jwt.PyJWKClient:
     """Lazy, cached JWKS client for the current Supabase project."""
     global _jwks_client
     if _jwks_client is None:
-        _jwks_client = jwt.PyJWKClient(f"{settings.SUPABASE_URL}/auth/v1/.well-known/jwks.json")
+        _jwks_client = jwt.PyJWKClient(
+            f"{settings.SUPABASE_URL}/auth/v1/.well-known/jwks.json",
+            ssl_context=create_tls_context(),
+        )
     return _jwks_client
 
 

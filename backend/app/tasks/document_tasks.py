@@ -2,9 +2,7 @@ import asyncio
 import uuid
 import json
 import structlog
-from typing import Optional
 from celery import shared_task
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.db.session import async_task_session_factory as async_session_factory
@@ -15,6 +13,7 @@ from app.core.parsers import DocumentParser
 from app.core.config import settings
 from app.ai.llm_client import AIQuotaExhaustedError
 from app.tasks.analysis_tasks import run_analysis_task
+from app.tasks.product_search_tasks import search_products_task
 
 logger = structlog.get_logger(__name__)
 
@@ -125,8 +124,11 @@ async def process_document_async(task, document_id_str: str) -> dict:
                 proj.status = "analyzing" # Ready for AI
                 await db.commit()
                 
-            # TRIGGER AI ANALYSIS automatically when document reaches ready
+            # Trigger both tender analysis and supplier discovery automatically.
+            # Product discovery reads the extracted text saved above, so users do
+            # not need a second manual action after uploading a technical spec.
             run_analysis_task.delay(str(doc.project_id), str(doc.id), str(doc.company_id))
+            search_products_task.delay(str(doc.project_id))
 
             return {"status": "success", "document_id": str(document_id)}
             

@@ -8,7 +8,7 @@ from app.main import app
 from app.api.deps import get_db, get_current_user
 from app.db.models.user import User
 from app.db.models.project import Project
-from app.db.models.chat import ChatSession, ChatMessage
+from app.db.models.chat import ChatSession
 from app.schemas.chat import ChatReplyOutput
 from app.ai.chat_agent import classify_fields, ChatAgent
 from tests.conftest import scalar_first, scalars_all, db_dispatch
@@ -34,6 +34,7 @@ def make_shared_db(project, session, messages=None):
     """Fake db whose execute() routes by table; chat_sessions always returns
     the SAME session object (both .first() and .scalar_one() paths)."""
     db = AsyncMock()
+    db.add = MagicMock()
 
     async def execute(stmt, *a, **kw):
         try:

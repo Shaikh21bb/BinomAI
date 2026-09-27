@@ -190,13 +190,22 @@ export function ProjectsDashboard({ pageLabel = 'Мои тендеры', pageDes
             <p className="text-body-lg font-body-lg text-on-surface-variant mt-1">{pageDescription}</p>
           )}
         </div>
-        <button
-          onClick={() => setDialogOpen(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-on-background text-on-primary rounded-lg text-label-md font-label-md hover:opacity-90 transition-opacity shadow-sm active:scale-[0.98] duration-150"
-        >
-          <span className="material-symbols-outlined text-[18px]">add</span>
-          Новый тендер
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={() => router.push('/quick-check')}
+            className="flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/10 px-4 py-2 text-label-md font-label-md text-primary transition-colors hover:bg-primary/20"
+          >
+            <span className="material-symbols-outlined text-[18px]">bolt</span>
+            Быстро проверить PDF
+          </button>
+          <button
+            onClick={() => setDialogOpen(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-on-background text-on-primary rounded-lg text-label-md font-label-md hover:opacity-90 transition-opacity shadow-sm active:scale-[0.98] duration-150"
+          >
+            <span className="material-symbols-outlined text-[18px]">add</span>
+            Новый тендер
+          </button>
+        </div>
       </div>
 
       {/* Limited access banner */}
@@ -349,6 +358,18 @@ export function ProjectsDashboard({ pageLabel = 'Мои тендеры', pageDes
                 <div className="flex flex-col sm:items-end gap-2 shrink-0">
                   <div className="flex items-center gap-3">
                     <StatusBadge status={project.status} />
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        router.push(`/projects/${project.id}/products`);
+                      }}
+                      className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-primary/10 px-3 text-label-sm font-label-sm text-primary transition-colors hover:bg-primary/20"
+                      aria-label={`Проверить товары тендера ${project.name}`}
+                      title="Открыть найденные товары и поставщиков"
+                    >
+                      <span className="material-symbols-outlined text-[17px]">travel_explore</span>
+                      <span className="hidden md:inline">Проверить товары</span>
+                    </button>
                     <button
                       onClick={(e) => {
                         e.stopPropagation();

@@ -321,13 +321,20 @@ export default function ProjectDocumentPage() {
       </div>
 
       <InfoBanner>
-        AI сопоставляет спецификацию с техническими требованиями, выявляет риски и недостающие документы. После
-        обработки вы сможете перейти к анализу.
+        После загрузки система автоматически анализирует ТЗ, извлекает товары, количество и характеристики,
+        а затем ищет подходящие открытые источники. Найденные веб-цены остаются непроверенными до получения КП.
       </InfoBanner>
 
       {/* Next step */}
       {ready && (
-        <div className="sticky bottom-4 flex justify-end">
+        <div className="sticky bottom-4 flex flex-wrap justify-end gap-2">
+          <Link
+            href={`/projects/${projectId}/products`}
+            className="flex items-center gap-2 rounded-lg border border-outline-variant bg-surface-container-lowest px-5 py-2.5 text-label-md font-label-md text-on-surface shadow-lg transition-colors hover:border-primary"
+          >
+            Найденные товары
+            <span className="material-symbols-outlined text-[18px]">travel_explore</span>
+          </Link>
           <Link
             href={`/projects/${projectId}/analysis`}
             className="flex items-center gap-2 px-5 py-2.5 bg-on-background text-on-primary rounded-lg text-label-md font-label-md hover:opacity-90 transition-opacity shadow-lg"

@@ -13,7 +13,6 @@ from app.schemas.tender_lot import TenderLotCreate, TenderLotOut, TenderLotListR
 from app.schemas.project import ProjectResponse as ProjectOut
 from app.services.tender_monitor import fetch_lot_page, TenderParseError
 from app.services.notifications import notify_company
-from app.core.config import settings
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)

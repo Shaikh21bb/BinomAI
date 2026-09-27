@@ -73,7 +73,6 @@ async def test_create_project_limited_under_limit(client):
     result_proxy = MagicMock()
     result_proxy.scalar.return_value = 1
 
-    from app.api.v1.endpoints import projects as projects_module
     async def fake_execute(stmt, *a, **kw):
         return result_proxy
 

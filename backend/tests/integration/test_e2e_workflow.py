@@ -107,6 +107,7 @@ async def test_end_to_end_workflow(async_client):
     with patch("app.core.parsers.DocumentParser.extract_from_pdf", return_value="Test extracted text"), \
          patch("app.tasks.document_tasks.async_session_factory") as mock_factory, \
          patch("app.tasks.analysis_tasks.run_analysis_task.delay") as mock_analysis_delay, \
+         patch("app.tasks.document_tasks.search_products_task.delay") as mock_product_search, \
          patch("app.tasks.document_tasks.supabase_admin.get_client") as mock_storage:
         mock_factory.return_value.__aenter__.return_value = db_mock
         inst = mock_storage.return_value.__aenter__.return_value
@@ -118,6 +119,7 @@ async def test_end_to_end_workflow(async_client):
         result = await process_document_async(mock_task, str(uploaded.id))
         assert result["status"] == "success"
         mock_analysis_delay.assert_called_once()
+        mock_product_search.assert_called_once_with(str(uploaded.project_id))
 
     # 4. Simulate Celery execution: run_analysis_async
     from app.tasks.analysis_tasks import run_analysis_async
@@ -139,6 +141,7 @@ async def test_end_to_end_workflow(async_client):
     )
 
     db_mock2 = AsyncMock()
+    db_mock2.add_all = MagicMock()
     result_mock2 = MagicMock()
     company = MagicMock()
     company.name = "Test Company"

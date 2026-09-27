@@ -11,7 +11,7 @@ const TABS = [
   { key: 'analysis', href: (id: string) => `/projects/${id}/analysis`, label: 'Анализ', icon: 'psychology' },
   { key: 'chat', href: (id: string) => `/projects/${id}/chat`, label: 'Диалог', icon: 'forum' },
   { key: 'generate', href: (id: string) => `/projects/${id}/generate`, label: 'Документы', icon: 'edit_document' },
-  { key: 'products', href: (id: string) => `/projects/${id}/products`, label: 'Снабжение', icon: 'inventory_2' },
+  { key: 'products', href: (id: string) => `/projects/${id}/products`, label: 'Товары', icon: 'inventory_2' },
   { key: 'export', href: (id: string) => `/projects/${id}/export`, label: 'Экспорт', icon: 'download' },
 ] as const;
 
@@ -102,6 +102,14 @@ export function ProjectTabs({ projectId }: { projectId: string }) {
                   до {formatDate(project.deadline_at)}
                 </span>
               )}
+              <Link
+                href={`/projects/${projectId}/products`}
+                className="ml-auto inline-flex items-center gap-2 rounded-lg bg-primary px-3.5 py-2 text-label-md font-label-md text-on-primary shadow-sm transition-opacity hover:opacity-90"
+                aria-label="Проверить товары этого тендера"
+              >
+                <span className="material-symbols-outlined text-[18px]">travel_explore</span>
+                Проверить товары
+              </Link>
             </>
           )}
         </div>

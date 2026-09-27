@@ -1,9 +1,8 @@
-import os
 import json
 import asyncio
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
-from typing import Type, TypeVar, Any
+from typing import Type, TypeVar
 from pydantic import BaseModel
 from app.core.config import settings
 
@@ -76,7 +75,7 @@ async def _call_gemini(prompt: str, system_prompt: str, schema_class: Type[T]) -
         resp = await asyncio.wait_for(
             client.post(
                 url,
-                params={"key": settings.GOOGLE_AI_API_KEY},
+                headers={"x-goog-api-key": settings.GOOGLE_AI_API_KEY},
                 json=payload,
             ),
             timeout=180,

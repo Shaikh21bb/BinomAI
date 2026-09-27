@@ -1,4 +1,5 @@
 import asyncio
+import re
 import uuid
 import structlog
 from typing import List, Optional
@@ -12,10 +13,34 @@ from app.db.models.document import Document
 from app.db.models.product_search import ProductSearchItem
 from app.core.supabase import supabase_admin
 from app.services.product_extraction import extract_products_from_text
-from app.services.market_search import search_products
+from app.services.market_search import search_products, enrich_product_pages
+from app.services.product_matching import evaluate_product_leads
 from app.services.sourcing import normalize_name, normalize_unit
 
 logger = structlog.get_logger(__name__)
+
+
+def _build_search_query(product_name: str, specs: Optional[str]) -> str:
+    """Search for a product, not for an entire tender paragraph."""
+    name = " ".join((product_name or "").split())
+    details = " ".join((specs or "").split())
+    if not details:
+        return name[:120]
+    details = re.split(r";\s*(?:Место поставки|Срок поставки)\s*:", details, maxsplit=1, flags=re.I)[0]
+    base_name = name.split(",", 1)[0].strip()
+    measure = re.search(
+        r"об[ъь]?[её]м\s*:?[\s]*(\d+(?:[,.]\d+)?\s*(?:мл|ml|л|литр(?:а|ов)?|гр|г|кг))",
+        details,
+        flags=re.I,
+    )
+    if not measure:
+        measure = re.search(r"(\d+(?:[,.]\d+)?\s*(?:мл|ml|л|литр(?:а|ов)?|гр|г|кг|мм))\b", details, flags=re.I)
+    if measure:
+        return f"{base_name} {measure.group(1)}"[:120]
+    if len(name) > 90:
+        return name[:120]
+    first_detail = re.split(r"[.;]", details, maxsplit=1)[0].strip()
+    return f"{name} {first_detail}"[:120].strip()
 
 
 def _region_of(company) -> Optional[str]:
@@ -115,10 +140,21 @@ async def run_product_search_async(task, project_id_str: str) -> dict:
         # Search each product (sequential to be gentle on external services)
         for ps in stored:
             try:
-                query = ps.product_name
-                if ps.specs:
-                    query = f"{ps.product_name} {ps.specs}"
+                query = _build_search_query(ps.product_name, ps.specs)
                 results = await search_products(query, region)
+                # A search engine can return only category links on a repeat
+                # run. Recheck previously discovered product URLs before
+                # replacing useful cards with a weaker search result.
+                if sum(bool(row.get("is_product_page")) for row in results) < 6:
+                    previous = [
+                        {"url": row["url"], "title": row.get("title"), "shop": row.get("shop"), "city": row.get("city")}
+                        for row in (ps.results or [])
+                        if isinstance(row, dict) and row.get("is_product_page") and row.get("url")
+                    ][:6]
+                    refreshed = await enrich_product_pages(previous)
+                    known_urls = {row.get("url") for row in results}
+                    results = [row for row in refreshed if row.get("is_product_page") and row.get("url") not in known_urls] + results
+                results = await evaluate_product_leads(ps.product_name, ps.specs, results)
                 ps.results = results
                 ps.status = "ready"
                 ps.best_match = _pick_discovery_lead(results)
@@ -133,18 +169,8 @@ async def run_product_search_async(task, project_id_str: str) -> dict:
 
 
 def _pick_discovery_lead(results: List[dict]) -> Optional[dict]:
-    """Pick an evidence-rich lead without implying a lowest-price recommendation."""
-    if not results:
-        return None
-    # Prefer results with a real product photo over a favicon fallback
-    def is_real_photo(r: dict) -> bool:
-        img = r.get("image_url") or ""
-        return bool(img) and "google.com/s2/favicons" not in img
-    evidence_rich = [r for r in results if r.get("url") and r.get("snippet") and is_real_photo(r)]
-    if evidence_rich:
-        return evidence_rich[0]
-    known_shops = [r for r in results if r.get("shop") and "маркетплейс" not in (r.get("title") or "")]
-    return known_shops[0] if known_shops else results[0]
+    """A best match exists only when every characteristic has source evidence."""
+    return next((row for row in results if row.get("match_status") == "matched"), None)
 
 
 @shared_task(bind=True, max_retries=1, default_retry_delay=60)

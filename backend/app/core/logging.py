@@ -12,6 +12,8 @@ def setup_logging(is_production: bool = False):
         stream=sys.stdout,
         level=logging.INFO if is_production else logging.DEBUG,
     )
+    # HTTPX's request log includes query parameters, which can contain API keys.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     processors = [
         structlog.stdlib.add_log_level,

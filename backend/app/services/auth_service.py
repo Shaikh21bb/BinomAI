@@ -1,14 +1,12 @@
 import uuid
-import httpx
-from typing import Optional
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import structlog
 
 from app.core.config import settings
-from app.core.supabase import supabase_admin
+from app.core.supabase import supabase_admin, create_supabase_http_client, supabase_auth_errors
 from app.schemas.auth import UserLogin, UserRegister, TokenRefresh
 from app.db.models.user import User
 from app.db.models.company import Company
@@ -30,7 +28,7 @@ class AuthService:
     async def login(db: AsyncSession, credentials: UserLogin) -> dict:
         url = f"{settings.SUPABASE_URL}/auth/v1/token?grant_type=password"
         
-        async with httpx.AsyncClient() as client:
+        async with supabase_auth_errors(), create_supabase_http_client() as client:
             headers = {
                 "apikey": settings.SUPABASE_ANON_KEY,
                 "Content-Type": "application/json"
@@ -87,7 +85,7 @@ class AuthService:
     async def refresh_token(token_data: TokenRefresh) -> dict:
         url = f"{settings.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token"
         
-        async with httpx.AsyncClient() as client:
+        async with supabase_auth_errors(), create_supabase_http_client() as client:
             headers = {
                 "apikey": settings.SUPABASE_ANON_KEY,
                 "Content-Type": "application/json"
@@ -113,7 +111,7 @@ class AuthService:
     async def logout(access_token: str) -> None:
         url = f"{settings.SUPABASE_URL}/auth/v1/logout"
         
-        async with httpx.AsyncClient() as client:
+        async with supabase_auth_errors(), create_supabase_http_client() as client:
             headers = {
                 "apikey": settings.SUPABASE_ANON_KEY,
                 "Authorization": f"Bearer {access_token}"
@@ -128,7 +126,7 @@ class AuthService:
         # 1. Create User in Supabase Auth
         url = f"{settings.SUPABASE_URL}/auth/v1/admin/users"
         
-        async with supabase_admin.get_client() as client:
+        async with supabase_auth_errors(), supabase_admin.get_client() as client:
             payload = {
                 "email": data.email,
                 "password": data.password,

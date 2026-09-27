@@ -6,6 +6,7 @@ def no_celery_publish():
     """Tests must never publish real Celery tasks (would poison the dev queue)."""
     with patch("app.tasks.document_tasks.process_document.delay"), \
          patch("app.tasks.document_tasks.run_analysis_task.delay"), \
+         patch("app.tasks.document_tasks.search_products_task.delay"), \
          patch("app.tasks.analysis_tasks.run_analysis_task.delay"), \
          patch("app.api.v1.endpoints.analysis.run_analysis_task.delay"), \
          patch("app.api.v1.endpoints.products.search_products_task.delay"), \
@@ -66,6 +67,10 @@ def db_dispatch(rows):
     from sqlalchemy.sql.dml import Delete
 
     db = AsyncMock()
+    # SQLAlchemy session mutation methods are synchronous. Keeping them as
+    # AsyncMock creates un-awaited coroutine warnings and hides bad test setup.
+    db.add = MagicMock()
+    db.add_all = MagicMock()
 
     async def execute(stmt, *a, **kw):
         if isinstance(stmt, Delete):

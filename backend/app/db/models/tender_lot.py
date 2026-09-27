@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
-from sqlalchemy import String, Text, ForeignKey, DateTime, Numeric, Boolean, Integer
+from sqlalchemy import String, Text, ForeignKey, DateTime, Numeric, Integer
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base

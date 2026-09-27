@@ -2,11 +2,9 @@ import asyncio
 import uuid
 import structlog
 from celery import shared_task
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.db.session import async_task_session_factory as async_session_factory
-from app.db.models.document import Document
 from app.db.models.company import Company
 from app.db.models.project import Project
 from app.ai.llm_client import AIQuotaExhaustedError
@@ -76,7 +74,7 @@ async def run_analysis_async(task, project_id_str: str, document_id_str: str, co
                 db,
                 company_id,
                 "analysis_ready",
-                f"AI-анализ ТЗ завершён",
+                "AI-анализ ТЗ завершён",
                 f"Анализ документа «{getattr(proj, 'name', '') or 'без названия'}» готов — можно переходить к уточнениям и генерации.",
                 f"/projects/{project_id}/analysis",
             )

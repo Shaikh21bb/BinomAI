@@ -6,12 +6,10 @@ import structlog
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-import httpx
 from fastapi import HTTPException
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.ai.llm_client import call_llm
 from app.db.models.generated_document import GeneratedDocument
 from app.db.models.project import Project

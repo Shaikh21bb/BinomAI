@@ -15,6 +15,12 @@ RUN pip install --no-cache-dir --prefix=/deps -r requirements.txt
 FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    poppler-utils \
+    tesseract-ocr \
+    tesseract-ocr-rus \
+    tesseract-ocr-kaz \
+    tesseract-ocr-eng \
     libglib2.0-0 \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \

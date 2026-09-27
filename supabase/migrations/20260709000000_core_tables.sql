@@ -8,8 +8,6 @@ BEGIN
     RETURN NEW;
 END;
 $$ language 'plpgsql';
-
-
 -- 1. Companies
 CREATE TABLE companies (
     id              UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -36,18 +34,13 @@ CREATE TABLE companies (
     updated_at      TIMESTAMPTZ     NOT NULL DEFAULT now(),
     is_active       BOOLEAN         NOT NULL DEFAULT true
 );
-
 CREATE INDEX idx_companies_bin_iin ON companies(bin_iin);
-
 ALTER TABLE companies ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "companies_own_access" ON companies
     FOR ALL USING (id = (auth.jwt() ->> 'company_id')::UUID);
-
 CREATE TRIGGER set_companies_updated_at
     BEFORE UPDATE ON companies
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
-
-
 -- 2. Users (Public)
 CREATE TABLE public.users (
     id              UUID            PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -66,21 +59,16 @@ CREATE TABLE public.users (
     updated_at      TIMESTAMPTZ     NOT NULL DEFAULT now(),
     is_active       BOOLEAN         NOT NULL DEFAULT true
 );
-
 CREATE INDEX idx_users_company_id ON public.users(company_id);
 CREATE INDEX idx_users_role ON public.users(company_id, role);
-
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "users_own_company" ON public.users
     FOR ALL USING (company_id = (auth.jwt() ->> 'company_id')::UUID);
 CREATE POLICY "users_own_profile" ON public.users
     FOR ALL USING (id = auth.uid());
-
 CREATE TRIGGER set_users_updated_at
     BEFORE UPDATE ON public.users
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
-
-
 -- 3. Projects
 CREATE TABLE projects (
     id              UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -100,20 +88,15 @@ CREATE TABLE projects (
     created_at      TIMESTAMPTZ     NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ     NOT NULL DEFAULT now()
 );
-
 CREATE INDEX idx_projects_company_id ON projects(company_id);
 CREATE INDEX idx_projects_status ON projects(company_id, status);
 CREATE INDEX idx_projects_created_at ON projects(company_id, created_at DESC);
-
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "projects_company_access" ON projects
     FOR ALL USING (company_id = (auth.jwt() ->> 'company_id')::UUID);
-
 CREATE TRIGGER set_projects_updated_at
     BEFORE UPDATE ON projects
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
-
-
 -- 4. Documents
 CREATE TABLE documents (
     id              UUID            PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -138,15 +121,12 @@ CREATE TABLE documents (
     created_at      TIMESTAMPTZ     NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ     NOT NULL DEFAULT now()
 );
-
 CREATE INDEX idx_documents_project_id ON documents(project_id);
 CREATE INDEX idx_documents_company_id ON documents(company_id);
 CREATE INDEX idx_documents_current ON documents(project_id, is_current) WHERE is_current = true;
-
 ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "documents_company_access" ON documents
     FOR ALL USING (company_id = (auth.jwt() ->> 'company_id')::UUID);
-
 CREATE TRIGGER set_documents_updated_at
     BEFORE UPDATE ON documents
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();

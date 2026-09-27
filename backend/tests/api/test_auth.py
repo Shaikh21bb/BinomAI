@@ -1,21 +1,24 @@
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, ConnectError
 import uuid
 
 from app.main import app
-from app.api.deps import get_db, get_current_user
+from app.api.deps import get_db, get_current_user, get_redis
 from app.db.models.user import User
 
 DUMMY_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 DUMMY_COMPANY_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
 @pytest.fixture
-async def client():
-    mock_session = AsyncMock()
+async def client(mock_db_session):
+    cache = AsyncMock()
+    cache.eval.return_value = [1, 60]
+
     async def override_get_db():
-        yield mock_session
+        yield mock_db_session
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_redis] = lambda: cache
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -73,6 +76,82 @@ async def test_login_invalid_credentials(client, mock_httpx_client):
 
     assert response.status_code == 401
     assert "Неверный" in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_login_rate_limit_stops_upstream_request(client, mock_httpx_client):
+    cache = AsyncMock()
+    cache.eval.return_value = [21, 37]
+    app.dependency_overrides[get_redis] = lambda: cache
+
+    response = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "test@test.com", "password": "password"},
+    )
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "37"
+    mock_httpx_client.return_value.__aenter__.return_value.post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transport_error",
+    [
+        "Connection refused",
+        "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+        "unable to get local issuer certificate (_ssl.c:1016)",
+    ],
+    ids=["connection", "certificate"],
+)
+@pytest.mark.parametrize(
+    "endpoint,payload,headers",
+    [
+        (
+            "register",
+            {
+                "email": "test@test.com",
+                "password": "password",
+                "full_name": "Test User",
+                "company_name": "Test Co",
+            },
+            {},
+        ),
+        ("login", {"email": "test@test.com", "password": "password"}, {}),
+        ("refresh", {"refresh_token": "refresh-token"}, {}),
+        ("logout", None, {"Authorization": "Bearer some-token"}),
+    ],
+)
+async def test_auth_connection_failure_returns_readable_503(
+    client,
+    mock_db_session,
+    mock_supabase_admin,
+    mock_httpx_client,
+    endpoint,
+    payload,
+    headers,
+    transport_error,
+):
+    provider = mock_supabase_admin if endpoint == "register" else mock_httpx_client
+    upstream_client = provider.return_value.__aenter__.return_value
+    upstream_client.post.side_effect = ConnectError(transport_error)
+
+    response = await client.post(
+        f"/api/v1/auth/{endpoint}", json=payload, headers=headers
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["message"] == (
+        "Сервис авторизации временно недоступен. Попробуйте ещё раз."
+    )
+    assert transport_error not in response.text
+    assert "CERTIFICATE_VERIFY_FAILED" not in response.text
+    upstream_client.post.assert_awaited_once()
+    if endpoint == "register":
+        mock_db_session.add.assert_not_called()
+        mock_db_session.flush.assert_not_awaited()
+        mock_db_session.commit.assert_not_awaited()
+
 
 @pytest.mark.asyncio
 async def test_protected_route_without_token(client):
@@ -190,26 +269,18 @@ async def test_logout_requires_bearer(client):
 
 
 @pytest.mark.asyncio
-async def test_get_me_with_company_email(client):
-    from app.db.models.company import Company
-    from app.db.models.user import User
-    from tests.conftest import scalar_first
-
-    user = User(id=DUMMY_USER_ID, company_id=DUMMY_COMPANY_ID, role="admin")
+async def test_get_me_uses_current_user_email(client):
+    user = User(
+        id=DUMMY_USER_ID,
+        company_id=DUMMY_COMPANY_ID,
+        role="admin",
+        email="user@test.kz",
+    )
 
     db = AsyncMock()
 
-    def companies_entry(stmt):
-        return scalar_first("company@test.kz")
-
     async def execute(stmt, *a, **kw):
-        try:
-            table = stmt.get_final_froms()[0].name
-        except Exception:
-            table = "default"
-        if table == "companies":
-            return companies_entry(stmt)
-        return scalar_first(None)
+        raise AssertionError("GET /auth/me must not query the company email")
 
     db.execute = execute
 
@@ -231,13 +302,12 @@ async def test_get_me_with_company_email(client):
     assert response.status_code == 200
     body = response.json()
     assert body["id"] == str(DUMMY_USER_ID)
-    assert body["email"] == "company@test.kz"
+    assert body["email"] == "user@test.kz"
     assert body["role"] == "admin"
 
 
 @pytest.mark.asyncio
 async def test_get_me_falls_back_to_supabase_admin(client, mock_verify_jwt):
-    from app.db.models.user import User
     from tests.conftest import scalar_first
 
     user = User(id=DUMMY_USER_ID, company_id=DUMMY_COMPANY_ID, role="limited")

@@ -2,6 +2,12 @@ FROM python:3.11-slim
 
 # System dependencies for PyMuPDF and other tools
 RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    poppler-utils \
+    tesseract-ocr \
+    tesseract-ocr-rus \
+    tesseract-ocr-kaz \
+    tesseract-ocr-eng \
     libmupdf-dev \
     libglib2.0-0 \
     libpango-1.0-0 \

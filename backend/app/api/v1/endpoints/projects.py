@@ -5,7 +5,6 @@ from typing import Optional
 import uuid
 
 from app.api.deps import get_db, get_current_user
-from app.core.config import settings
 from app.core.plans import get_plan
 from app.db.models.user import User
 from app.db.models.project import Project

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 import json
 from sqlalchemy import text
 import redis.asyncio as redis
@@ -6,10 +6,13 @@ import structlog
 import httpx
 
 from app.core.config import settings
+from app.api.deps import RoleChecker
+from app.db.models.user import User
 from app.db.session import async_session_factory
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
+DEBUG_OWNER = RoleChecker(["owner"])
 
 @router.get("/health")
 @router.get("/health/live")
@@ -82,7 +85,8 @@ async def health_ready():
         health_status["supabase"] = "error"
 
     # 5. Check AI Engine (keys presence)
-    if settings.GOOGLE_AI_API_KEY and len(settings.GOOGLE_AI_API_KEY) > 5:
+    ai_key = settings.GOOGLE_AI_API_KEY or settings.OPENAI_API_KEY
+    if ai_key and len(ai_key) > 5:
         health_status["ai_engine"] = "ok"
     else:
         health_status["ai_engine"] = "error (missing key)"
@@ -93,16 +97,20 @@ async def health_ready():
         health_status["status"] = "error"
         health_status["jwt"] = "error (missing secret)"
 
+    is_production = settings.APP_ENV.casefold() in {"prod", "production"}
+    response_body = {"status": health_status["status"]} if is_production else health_status
     return Response(
-        content=json.dumps(health_status, ensure_ascii=False),
+        content=json.dumps(response_body, ensure_ascii=False),
         media_type="application/json",
         status_code=status.HTTP_200_OK if health_status["status"] == "ok" else status.HTTP_503_SERVICE_UNAVAILABLE,
     )
 
 
 @router.get("/health/workers")
-async def health_workers():
+async def health_workers(_owner: User = Depends(DEBUG_OWNER)):
     """Diagnostics: what the Celery worker is doing right now."""
+    if not settings.DEBUG or settings.APP_ENV.casefold() in {"prod", "production"}:
+        raise HTTPException(status_code=404, detail="Not found")
     try:
         from app.tasks.celery_app import celery_app
 
@@ -143,7 +151,6 @@ async def health_workers():
         except Exception as e:  # noqa: BLE001
             processes = [f"proc error: {e}"]
         try:
-            import asyncio as _asyncio
             import datetime as _datetime
             async with async_session_factory() as _db:
                 _db_now = (await _db.execute(text("SELECT now()"))).scalar()

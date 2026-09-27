@@ -11,7 +11,7 @@ from app.db.models.user import User
 from app.db.models.company import Company
 from app.db.models.project import Project
 from app.db.models.plan_request import PlanRequest
-from tests.conftest import scalar_first, db_dispatch
+from tests.conftest import db_dispatch
 
 DUMMY_COMPANY_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 DUMMY_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")

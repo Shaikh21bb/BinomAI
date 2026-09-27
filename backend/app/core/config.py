@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     # App Settings
     APP_NAME: str = "BINOM AI"
     APP_ENV: str = "development"
-    APP_VERSION: str = "1.0.0"
+    APP_VERSION: str = "1.1.0"
     DEBUG: bool = False
 
     # Supabase Settings
@@ -62,6 +62,11 @@ class Settings(BaseSettings):
 
     # Access control
     LIMITED_PROJECTS_LIMIT: int = 2
+
+    # Rate limiting
+    RATE_LIMIT_AUTH: str = "20/minute"
+    RATE_LIMIT_AI_OPS: str = "10/minute"
+    RATE_LIMIT_UPLOADS: str = "5/minute"
 
     @computed_field
     @property

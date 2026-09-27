@@ -1,7 +1,6 @@
-import pytest
 import io
 
-from app.services.generation_service import GenerationService, _md_to_html, _full_html
+from app.services.generation_service import GenerationService, _md_to_html
 
 MD_WITH_TABLE = """## Спецификация элементов крыши
 

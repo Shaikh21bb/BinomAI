@@ -56,6 +56,30 @@ CREATE TABLE IF NOT EXISTS sourcing_plans (
     CONSTRAINT uq_sourcing_plans_project UNIQUE (project_id)
 );
 
+-- Earlier production builds used sourcing_settings. Preserve any values while
+-- moving to the schema used by the current backend; keep the legacy table as a
+-- rollback aid instead of dropping it during the release.
+DO $$
+BEGIN
+    IF to_regclass('public.sourcing_settings') IS NOT NULL THEN
+        EXECUTE $copy$
+            INSERT INTO public.sourcing_plans (
+                id, project_id, company_id, target_margin_pct, base_currency,
+                created_at, updated_at
+            )
+            SELECT
+                id, project_id, company_id, target_margin_percent, base_currency,
+                created_at, updated_at
+            FROM public.sourcing_settings
+            ON CONFLICT (project_id) DO UPDATE SET
+                target_margin_pct = EXCLUDED.target_margin_pct,
+                base_currency = EXCLUDED.base_currency,
+                updated_at = EXCLUDED.updated_at
+        $copy$;
+    END IF;
+END
+$$;
+
 CREATE INDEX IF NOT EXISTS idx_sourcing_plans_company ON sourcing_plans(company_id);
 
 ALTER TABLE sourcing_plans ENABLE ROW LEVEL SECURITY;
@@ -120,6 +144,133 @@ CREATE TABLE IF NOT EXISTS supplier_offers (
     created_at              timestamptz NOT NULL DEFAULT now(),
     updated_at              timestamptz NOT NULL DEFAULT now()
 );
+
+-- Upgrade the pre-release supplier_offers table in place. CREATE TABLE IF NOT
+-- EXISTS does not add columns to an existing table, so each current field must
+-- be added explicitly before indexes and application queries use it.
+ALTER TABLE public.supplier_offers
+    ADD COLUMN IF NOT EXISTS item_id uuid REFERENCES public.product_search_items(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS original_item_name varchar(500),
+    ADD COLUMN IF NOT EXISTS normalized_item_name varchar(500),
+    ADD COLUMN IF NOT EXISTS original_unit varchar(80),
+    ADD COLUMN IF NOT EXISTS normalized_unit varchar(30),
+    ADD COLUMN IF NOT EXISTS quoted_quantity numeric(18,4),
+    ADD COLUMN IF NOT EXISTS price_quantity numeric(18,4) NOT NULL DEFAULT 1,
+    ADD COLUMN IF NOT EXISTS moq numeric(18,4),
+    ADD COLUMN IF NOT EXISTS lead_time_days integer,
+    ADD COLUMN IF NOT EXISTS characteristics jsonb NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS compliance_status varchar(30) NOT NULL DEFAULT 'unknown',
+    ADD COLUMN IF NOT EXISTS valid_until date,
+    ADD COLUMN IF NOT EXISTS source_filename varchar(500),
+    ADD COLUMN IF NOT EXISTS source_url text,
+    ADD COLUMN IF NOT EXISTS match_confidence numeric(5,4),
+    ADD COLUMN IF NOT EXISTS selection_note text;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'supplier_offers'
+          AND column_name = 'product_item_id'
+    ) THEN
+        EXECUTE 'UPDATE public.supplier_offers SET item_id = COALESCE(item_id, product_item_id)';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'supplier_offers'
+          AND column_name = 'product_name'
+    ) THEN
+        EXECUTE 'UPDATE public.supplier_offers SET original_item_name = COALESCE(original_item_name, product_name)';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'supplier_offers'
+          AND column_name = 'quoted_unit'
+    ) THEN
+        EXECUTE 'UPDATE public.supplier_offers SET original_unit = COALESCE(original_unit, quoted_unit)';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'supplier_offers'
+          AND column_name = 'offered_quantity'
+    ) THEN
+        EXECUTE 'UPDATE public.supplier_offers SET quoted_quantity = COALESCE(quoted_quantity, offered_quantity)';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'supplier_offers'
+          AND column_name = 'min_order_quantity'
+    ) THEN
+        EXECUTE 'UPDATE public.supplier_offers SET moq = COALESCE(moq, min_order_quantity)';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'supplier_offers'
+          AND column_name = 'delivery_days'
+    ) THEN
+        EXECUTE 'UPDATE public.supplier_offers SET lead_time_days = COALESCE(lead_time_days, delivery_days)';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'supplier_offers'
+          AND column_name = 'price_valid_until'
+    ) THEN
+        EXECUTE 'UPDATE public.supplier_offers SET valid_until = COALESCE(valid_until, price_valid_until)';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'supplier_offers'
+          AND column_name = 'specification_compliant'
+    ) THEN
+        EXECUTE $migrate$
+            UPDATE public.supplier_offers
+            SET compliance_status = CASE
+                WHEN specification_compliant IS TRUE THEN 'compliant'
+                WHEN specification_compliant IS FALSE THEN 'noncompliant'
+                ELSE 'unknown'
+            END
+        $migrate$;
+    END IF;
+END
+$$;
+
+UPDATE public.supplier_offers
+SET original_item_name = COALESCE(NULLIF(original_item_name, ''), 'Legacy offer ' || id::text),
+    unit_price = COALESCE(unit_price, 0),
+    match_status = CASE
+        WHEN match_status IN ('matched', 'needs_review', 'unmatched') THEN match_status
+        WHEN match_status IN ('confirmed', 'auto') THEN 'matched'
+        WHEN match_status IN ('review', 'ambiguous') THEN 'needs_review'
+        ELSE 'unmatched'
+    END;
+
+ALTER TABLE public.supplier_offers
+    ALTER COLUMN original_item_name SET NOT NULL,
+    ALTER COLUMN unit_price SET NOT NULL,
+    ALTER COLUMN match_status SET DEFAULT 'matched';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'supplier_offers_unit_price_nonnegative') THEN
+        ALTER TABLE public.supplier_offers
+            ADD CONSTRAINT supplier_offers_unit_price_nonnegative CHECK (unit_price >= 0);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'supplier_offers_price_quantity_positive') THEN
+        ALTER TABLE public.supplier_offers
+            ADD CONSTRAINT supplier_offers_price_quantity_positive CHECK (price_quantity > 0);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'supplier_offers_compliance_status_valid') THEN
+        ALTER TABLE public.supplier_offers
+            ADD CONSTRAINT supplier_offers_compliance_status_valid
+            CHECK (compliance_status IN ('compliant', 'partial', 'noncompliant', 'unknown'));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'supplier_offers_match_status_valid') THEN
+        ALTER TABLE public.supplier_offers
+            ADD CONSTRAINT supplier_offers_match_status_valid
+            CHECK (match_status IN ('matched', 'needs_review', 'unmatched'));
+    END IF;
+END
+$$;
 
 CREATE INDEX IF NOT EXISTS idx_supplier_offers_project ON supplier_offers(project_id);
 CREATE INDEX IF NOT EXISTS idx_supplier_offers_company ON supplier_offers(company_id);

@@ -25,6 +25,7 @@ async def custom_http_exception_handler(request: Request, exc: Exception, status
     Base exception handler formatting errors according to the API Specification.
     """
     message = str(exc)
+    public_message = "Внутренняя ошибка сервера." if status_code >= 500 else message
     logger.error(
         "http_exception",
         path=request.url.path,
@@ -40,7 +41,7 @@ async def custom_http_exception_handler(request: Request, exc: Exception, status
             "success": False,
             "error": {
                 "code": code,
-                "message": message,
+                "message": public_message,
                 "details": []
             },
             "meta": {}
@@ -80,7 +81,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
             "error": error_block,
             "meta": {}
         },
-        headers=_cors_headers(request)
+        headers={**(exc.headers or {}), **_cors_headers(request)}
     )
 
 async def validation_exception_handler(request: Request, exc: RequestValidationError):

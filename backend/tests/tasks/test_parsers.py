@@ -1,6 +1,4 @@
 import pytest
-import os
-import tempfile
 from unittest.mock import AsyncMock, patch, MagicMock
 
 from app.core.parsers import DocumentParser
@@ -79,7 +77,8 @@ async def test_process_document_success(mock_db_session, mock_supabase_storage):
     
     # Minimal valid PDF bytes (magic number) to pass PyMuPDF open, or mock parser
     with patch("app.core.parsers.DocumentParser.extract_from_pdf", return_value="Test extracted text"), \
-         patch("app.tasks.document_tasks.async_session_factory") as mock_factory:
+         patch("app.tasks.document_tasks.async_session_factory") as mock_factory, \
+         patch("app.tasks.document_tasks.search_products_task.delay") as mock_product_search:
         mock_factory.return_value.__aenter__.return_value = mock_db_session
         mock_client_instance = mock_supabase_storage.return_value.__aenter__.return_value
         mock_client_instance.get.return_value = mock_response
@@ -94,3 +93,4 @@ async def test_process_document_success(mock_db_session, mock_supabase_storage):
         assert mock_doc.processing_status == "ready"
         assert mock_doc.token_count > 0
         assert mock_task.update_state.call_count >= 4
+        mock_product_search.assert_called_once_with(str(mock_doc.project_id))

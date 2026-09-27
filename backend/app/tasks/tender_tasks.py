@@ -1,6 +1,6 @@
 import structlog
 from celery import shared_task
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from sqlalchemy import select
 
 from app.db.session import async_task_session_factory as async_session_factory

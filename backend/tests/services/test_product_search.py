@@ -1,8 +1,7 @@
-import pytest
 
 from app.services.product_extraction import extract_products_from_text
-from app.services.market_search import _extract_price, _shop_from_url, _relevant_result, _enrich_images
-from app.tasks.product_search_tasks import _region_of
+from app.services.market_search import _extract_price, _shop_from_url, _relevant_result
+from app.tasks.product_search_tasks import _build_search_query, _region_of
 
 
 SPEC_TEXT = """
@@ -52,6 +51,55 @@ def test_extract_products_plain_lines():
     assert len(products) >= 1
 
 
+def test_extract_products_from_bilingual_kazakhstan_techspec():
+    text = """
+Лоттың нөмірі : 84683164
+Лоттың қысқаша сипаттауы: Ыдысқа арналған жуу құралы (сұйық)
+Саны, көлемі: 62
+Өлшем бірлігі: Дана
+Номер пункта плана: № 84683164
+Наименование пункта плана: Cредство моющее
+Описание пункта плана: для мытья посуды, жидкость
+Дополнительное описание
+пункта плана:
+Моющее средство для посуды, жидкое, 500 мл
+Количество: 62
+Единица измерения: Штука
+Места поставки: г. Риддер, ул. Бухмейера, 9
+Срок поставки: 15 рабочих дней
+Описание требуемых функциональных, технических, качественных,
+эксплуатационных и иных характеристик закупаемого
+товара:
+Моющее средство для посуды (жидкое), объем 500 мл СТ РК ГОСТ Р 51696-2003
+Номер пункта плана: № 84742597
+Дополнительное описание пункта плана: Моющее средство для туалета, 500 гр
+Количество: 120
+Единица измерения: Штука
+"""
+    products = extract_products_from_text(text)
+
+    assert len(products) == 2
+    assert products[0]["product_name"] == "Моющее средство для посуды, жидкое, 500 мл"
+    assert products[0]["quantity"] == 62
+    assert products[0]["unit"] == "Штука"
+    assert "Бухмейера" in products[0]["specs"]
+    assert products[1]["quantity"] == 120
+
+
+def test_search_query_is_bounded_but_keeps_name():
+    query = _build_search_query("Моющее средство 500 мл", "Х" * 500)
+    assert query.startswith("Моющее средство 500 мл")
+    assert len(query) <= 120
+
+
+def test_search_query_uses_package_size_instead_of_long_tender_prose():
+    query = _build_search_query(
+        "Моющее средство для туалета, 500 гр",
+        "Удаляет ржавчину. Объём 500 мл, состав: вода; Место поставки: г. Риддер",
+    )
+    assert query == "Моющее средство для туалета 500 мл"
+
+
 def test_extract_price_tenge():
     assert _extract_price("Цена: 25 000 тенге") == 25000.0
     assert _extract_price("25 000 ₸") == 25000.0
@@ -79,42 +127,6 @@ def test_relevant_result():
     assert _relevant_result(match, "Бетон М300") is True
     assert _relevant_result({"title": "Новости стройки", "url": "https://news.kz/1"}, "Бетон М300") is False
     assert _relevant_result({"title": "М300", "url": "https://example.com/"}, "Бетон М300") is False
-
-
-async def test_enrich_images_og_image(mocker):
-    results = [
-        {"url": "https://satu.kz/item/1", "title": "x", "image_url": None},
-        {"url": "https://zavod-beton.kz/2", "title": "y", "image_url": None},
-    ]
-    html = '<html><head><meta property="og:image" content="https://cdn.example.com/img.jpg"></head></html>'
-
-    class FakeResp:
-        def __init__(self, text):
-            self.status_code = 200
-            self.text = text
-
-    mock_client = mocker.patch("app.services.market_search.httpx.AsyncClient")
-    mock_client.return_value.__aenter__.return_value.get.side_effect = [
-        FakeResp(html),
-        FakeResp("<html><body>no image here</body></html>"),
-    ]
-
-    out = await _enrich_images(results)
-    assert out[0]["image_url"] == "https://cdn.example.com/img.jpg"
-    assert "favicons" in out[1]["image_url"]  # favicon fallback
-
-
-async def test_enrich_images_respects_limit(mocker):
-    results = [
-        {"url": f"https://shop{i}.kz/p", "title": "t", "image_url": None}
-        for i in range(10)
-    ]
-    mock_client = mocker.patch("app.services.market_search.httpx.AsyncClient")
-    mock_client.return_value.__aenter__.return_value.get.side_effect = Exception("timeout")
-    out = await _enrich_images(results, limit=3)
-    assert all(r["image_url"] for r in out[:3])
-    assert not out[3]["image_url"]
-    assert mock_client.return_value.__aenter__.return_value.get.call_count == 3
 
 
 def test_region_of():
