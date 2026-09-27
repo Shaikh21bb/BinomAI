@@ -163,6 +163,7 @@ export default function QuickCheckPage() {
     if (!activeReportId || !['queued', 'running'].includes(activeReportState ?? '')) return;
     let cancelled = false;
     let fetching = false;
+    let polls = 0;
     async function poll() {
       if (fetching) return;
       fetching = true;
@@ -171,6 +172,8 @@ export default function QuickCheckPage() {
         if (cancelled) return;
         setParsed(report);
         setItems(report.items.map((item) => ({ ...item, results: item.results ?? [] })));
+        polls += 1;
+        if (polls % 3 === 0) void refreshHistory();
         if (!['queued', 'running'].includes(report.processing_state)) {
           setPhase('done');
           void refreshHistory();
