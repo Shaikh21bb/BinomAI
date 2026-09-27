@@ -35,6 +35,41 @@ def test_concrete_product_page_extracts_real_photo_specs_and_price():
     assert page["price"] == 1250
 
 
+@pytest.mark.parametrize(
+    "page_url",
+    [
+        "https://shop.example.kz/products/planka-karniznaya-100h69/",
+        "https://shop.example.kz/goods/117398747-planka-karniznaya/",
+        "https://shop.example.kz/catalog/krovlya/planka-karniznaya-100x69x2000/",
+    ],
+)
+def test_vendor_product_paths_extract_main_gallery_photo_without_json_ld(page_url):
+    page = parse_product_page(
+        """
+        <html><head><title>Планка карнизная 100х69х2000 — магазин</title>
+        <meta property="og:image" content="/assets/company-logo.png"></head>
+        <body><h1>Планка карнизная 100х69х2000</h1>
+        <img class="logo" src="/assets/logo.svg" alt="">
+        <img class="product_image" src="/coating-250.jpg" alt="Покрытие металла">
+        <img class="main-gallery" src="/thumb.jpg" data-src="/uploads/planka-100x69-full.jpg"
+             alt="Планка карнизная 100х69х2000">
+        </body></html>
+        """,
+        page_url,
+    )
+    assert page["is_product_page"] is True
+    assert page["title"] == "Планка карнизная 100х69х2000"
+    assert page["image_url"] == "https://shop.example.kz/uploads/planka-100x69-full.jpg"
+
+
+def test_plain_catalog_category_is_not_promoted_to_product_card():
+    page = parse_product_page(
+        '<h1>Кровельные материалы</h1><img class="catalog" src="/catalog/roof.jpg">',
+        "https://shop.example.kz/catalog/krovlya/",
+    )
+    assert page["is_product_page"] is False
+
+
 def test_published_inventory_count_is_separate_from_availability():
     page = parse_product_page(
         _markup(

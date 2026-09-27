@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import Image, { type ImageLoaderProps } from 'next/image';
 import { assessStock, displayUnit } from '@/lib/productStock';
 
 export interface DiscoveryCheck {
@@ -41,6 +42,10 @@ export function isVerifiedProductLead(lead: DiscoveryLead) {
   return Boolean(lead.is_product_page && lead.page_verified && typeCheck?.status === 'matched');
 }
 
+export function isProductCardLead(lead: DiscoveryLead) {
+  return Boolean(lead.is_product_page && lead.page_verified);
+}
+
 const tones = {
   matched: { label: 'Все требования подтверждены', cls: 'border-emerald-200 bg-emerald-50 text-emerald-800', icon: 'verified' },
   partial: { label: 'Подтверждено частично', cls: 'border-amber-200 bg-amber-50 text-amber-900', icon: 'rule' },
@@ -53,15 +58,30 @@ const checkLabels = { matched: 'Подтверждено', mismatch: 'Расхо
 const checkIcons = { matched: 'check_circle', mismatch: 'cancel', unknown: 'help' };
 const checkColors = { matched: 'text-emerald-700', mismatch: 'text-rose-700', unknown: 'text-amber-700' };
 
+const imageNoise = /favicon|logo|sprite|placeholder|\/watch\/|portal-portable|base_satu|pixel/i;
+
+function directImageLoader({ src }: ImageLoaderProps) {
+  return src;
+}
+
 function ProductPhoto({ src, name }: { src?: string | null; name: string }) {
-  const [failed, setFailed] = useState(false);
-  const valid = src?.startsWith('https://') || src?.startsWith('http://');
+  const imageUrl = src && /^https?:\/\//i.test(src) && !imageNoise.test(src) ? src : null;
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const failed = imageUrl != null && imageUrl === failedSrc;
   return (
-    <div className="flex h-44 items-center justify-center overflow-hidden rounded-xl bg-white ring-1 ring-outline-variant/70">
-      {valid && !failed ? (
-        // Vendor image hosts vary, so a direct image avoids a broad image proxy allowlist.
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={src || undefined} alt={`Фото товара: ${name}`} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)} className="h-full w-full object-contain p-3" />
+    <div className="relative flex h-44 items-center justify-center overflow-hidden rounded-xl bg-white ring-1 ring-outline-variant/70">
+      {imageUrl && !failed ? (
+        <Image
+          loader={directImageLoader}
+          unoptimized
+          fill
+          sizes="(max-width: 768px) 100vw, (max-width: 1280px) 50vw, 33vw"
+          src={imageUrl}
+          alt={`Фото товара: ${name}`}
+          referrerPolicy="no-referrer"
+          onError={() => setFailedSrc(imageUrl)}
+          className="object-contain p-3"
+        />
       ) : (
         <div className="flex flex-col items-center gap-1.5 text-on-surface-variant/70">
           <span className="material-symbols-outlined text-[46px]">inventory_2</span>
@@ -144,15 +164,15 @@ function ProductCard({ lead, requestedQuantity, requestedUnit }: { lead: Discove
 }
 
 export function ProductDiscoveryCards({ productName, leads, requestedQuantity, requestedUnit }: Props) {
-  const products = leads.filter(isVerifiedProductLead).slice(0, 8);
-  const searchLinks = leads.filter((lead) => !isVerifiedProductLead(lead) && lead.url).slice(0, 6);
+  const products = leads.filter(isProductCardLead).slice(0, 8);
+  const searchLinks = leads.filter((lead) => !isProductCardLead(lead) && lead.url).slice(0, 6);
 
   return (
     <div className="border-t border-outline-variant px-4 py-5 md:px-5">
       <div className="mb-4 flex flex-wrap items-start justify-between gap-2">
         <div>
           <h4 className="text-title-md font-title-md text-on-surface">Товары из открытых источников</h4>
-          <p className="mt-1 text-body-sm text-on-surface-variant">Карточки для позиции «{productName}». Совпадение показано только по сведениям, опубликованным продавцом.</p>
+          <p className="mt-1 text-body-sm text-on-surface-variant">Фото, характеристики и ссылка для позиции «{productName}». Цветная метка показывает, насколько опубликованные данные совпадают с ТЗ.</p>
         </div>
         <span className="rounded-full bg-primary/10 px-2.5 py-1 text-label-sm text-primary">{products.length} карточек</span>
       </div>
