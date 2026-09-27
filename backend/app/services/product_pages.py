@@ -14,7 +14,11 @@ import httpx
 
 _IMAGE_NOISE = re.compile(r"favicon|logo|sprite|placeholder|/watch/|portal-portable|base_satu|pixel", re.I)
 _GENERIC_PATH = re.compile(r"/(category|search|list|catalog/0|catalog/search|shop/search)(/|$)|/f/", re.I)
-_PRODUCT_PATH = re.compile(r"/p\d+[-/]|/p/[^/]+|/product/|/catalog/\d+/detail|/catalog/[^/]+/detail|/item/\d+", re.I)
+_PRODUCT_PATH = re.compile(
+    r"/p\d+[-/]|/p/[^/]+|/products?/[^/]+|/goods?/[^/]+|/catalog/\d+/detail|"
+    r"/catalog/[^/]+/detail|/items?/\d+|--\d{4,}/?$",
+    re.I,
+)
 _GENERIC_TITLE_WORDS = {"средс", "моющ", "товар", "купит", "ценам", "посуд", "коста"}
 _STOCK_TEXT = re.compile(r"(?:в наличии|на складе|остаток)\s*:?\s*(\d{1,6})\s*(шт\.?|штук|ед\.?|единиц|упак\.?|упаковок)\b", re.I)
 
@@ -60,6 +64,24 @@ def _image_url(value: Any, page_url: str) -> str | None:
     return url if is_public_url(url) and not _IMAGE_NOISE.search(url) else None
 
 
+def _best_page_image(images: list[tuple[str, str]], page_url: str, title: str) -> str | None:
+    title_words = {
+        word for word in re.findall(r"[a-zа-яё0-9]+", title.casefold()) if len(word) > 3
+    }
+    ranked: list[tuple[int, str]] = []
+    for candidate, context in images:
+        url = _image_url(candidate, page_url)
+        if not url:
+            continue
+        lowered_context = context.casefold()
+        score = 20
+        if any(marker in lowered_context for marker in ("gallery", "detail", "main", "product", "catalog")):
+            score += 40
+        score += min(60, 20 * sum(word in lowered_context for word in title_words))
+        ranked.append((score, url))
+    return max(ranked, default=(0, None), key=lambda row: row[0])[1]
+
+
 def _stock_quantity(offer: dict[str, Any], description: str, properties: dict[str, str]) -> tuple[int | None, str | None]:
     level = offer.get("inventoryLevel")
     if level is None:
@@ -103,7 +125,10 @@ class _PageParser(HTMLParser):
         self.scripts: list[str] = []
         self._script: list[str] | None = None
         self._title: list[str] | None = None
+        self._heading: list[str] | None = None
         self.title = ""
+        self.heading = ""
+        self.images: list[tuple[str, str]] = []
         self._row: list[str] | None = None
         self._cell: list[str] | None = None
         self.rows: list[list[str]] = []
@@ -118,6 +143,17 @@ class _PageParser(HTMLParser):
             self._script = []
         elif tag == "title":
             self._title = []
+        elif tag == "h1":
+            self._heading = []
+        elif tag == "img":
+            candidate = attributes.get("data-src") or attributes.get("data-lazy-src") or attributes.get("src")
+            if not candidate and attributes.get("srcset"):
+                candidate = attributes["srcset"].split(",")[-1].strip().split(" ")[0]
+            if candidate:
+                context = " ".join(
+                    attributes.get(key) or "" for key in ("alt", "class", "id", "itemprop")
+                )
+                self.images.append((candidate, context))
         elif tag == "tr":
             self._row = []
         elif tag in {"th", "td"} and self._row is not None:
@@ -128,6 +164,8 @@ class _PageParser(HTMLParser):
             self._script.append(data)
         if self._title is not None:
             self._title.append(data)
+        if self._heading is not None:
+            self._heading.append(data)
         if self._cell is not None:
             self._cell.append(data)
 
@@ -138,6 +176,10 @@ class _PageParser(HTMLParser):
         elif tag == "title" and self._title is not None:
             self.title = _clean("".join(self._title))
             self._title = None
+        elif tag == "h1" and self._heading is not None:
+            if not self.heading:
+                self.heading = _clean("".join(self._heading))
+            self._heading = None
         elif tag in {"th", "td"} and self._cell is not None:
             if self._row is not None:
                 self._row.append(_clean("".join(self._cell), 250))
@@ -170,14 +212,23 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
     title_words = {word[:5] for word in re.findall(r"[a-zа-яё]{5,}", page_title.casefold())} - _GENERIC_TITLE_WORDS
     product_words = {word[:5] for word in re.findall(r"[a-zа-яё]{5,}", product_name.casefold())} - _GENERIC_TITLE_WORDS
     name_on_page = not page_title or not product_name or len(title_words & product_words) >= 2
+    leaf = path.rstrip("/").rsplit("/", 1)[-1]
+    concrete_catalog_leaf = bool(
+        "/catalog/" in path.casefold()
+        and any(character.isdigit() for character in leaf)
+        and parser.heading
+        and parser.images
+    )
     is_product = not _GENERIC_PATH.search(path) and (
-        (bool(product) and name_on_page) or bool(_PRODUCT_PATH.search(path))
+        (bool(product) and name_on_page)
+        or bool(_PRODUCT_PATH.search(path))
+        or concrete_catalog_leaf
     )
     if not is_product:
         return {"is_product_page": False, "page_verified": True}
 
     product = product or {}
-    name = _clean(product.get("name") or parser.meta.get("og:title") or parser.title)
+    name = _clean(product.get("name") or parser.meta.get("og:title") or parser.heading or parser.title)
     description = _clean(product.get("description") or parser.meta.get("og:description") or parser.meta.get("description"), 2400)
     properties: dict[str, str] = {}
     for prop in product.get("additionalProperty") or []:
@@ -200,7 +251,12 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
         price = float(str(price).replace(" ", "").replace(",", ".")) if price else None
     except ValueError:
         price = None
-    image = _image_url(product.get("image"), page_url) or _image_url(parser.meta.get("og:image"), page_url)
+    image = (
+        _image_url(product.get("image"), page_url)
+        or _image_url(parser.meta.get("og:image"), page_url)
+        or _image_url(parser.meta.get("twitter:image") or parser.meta.get("twitter:image:src"), page_url)
+        or _best_page_image(parser.images, page_url, name or page_title)
+    )
     stock_quantity, stock_unit = _stock_quantity(offer, description, properties)
     evidence = "\n".join(filter(None, [name, description, *[f"{k}: {v}" for k, v in properties.items()]]))[:6500]
     return {

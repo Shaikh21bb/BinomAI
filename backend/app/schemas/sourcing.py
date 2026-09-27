@@ -2,6 +2,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal, Optional
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -73,6 +74,25 @@ class SupplierOfferBase(BaseModel):
 
 class SupplierOfferCreate(SupplierOfferBase):
     pass
+
+
+class DiscoveryOfferCreate(BaseModel):
+    source_url: str = Field(min_length=8, max_length=4000)
+
+    @field_validator("source_url")
+    @classmethod
+    def validate_source_url(cls, value: str) -> str:
+        normalized = value.strip()
+        parsed = urlsplit(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("source_url must be a public HTTP(S) URL")
+        return normalized
+
+
+class DiscoveryBatchResult(BaseModel):
+    added: int
+    skipped: int
+    errors: list[str] = Field(default_factory=list)
 
 
 class SupplierOfferUpdate(BaseModel):
