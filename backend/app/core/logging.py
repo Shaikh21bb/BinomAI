@@ -16,6 +16,7 @@ def setup_logging(is_production: bool = False):
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
     processors = [
+        structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso"),

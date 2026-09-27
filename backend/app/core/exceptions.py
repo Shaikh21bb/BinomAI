@@ -1,11 +1,27 @@
+from datetime import datetime, timezone
+
+import structlog
+from fastapi.exceptions import RequestValidationError
 from fastapi import Request, status
 from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
 from app.core.config import settings
-import structlog
 
 logger = structlog.get_logger(__name__)
+
+
+def _request_id(request: Request) -> str | None:
+    return getattr(request.state, "request_id", None)
+
+
+def _response_meta(request: Request) -> dict:
+    meta = {"timestamp": datetime.now(timezone.utc).isoformat()}
+    request_id = _request_id(request)
+    if request_id:
+        meta["request_id"] = request_id
+    return meta
+
 
 def _cors_headers(request: Request) -> dict:
     """Ensure CORS headers are present even on error responses."""
@@ -20,6 +36,16 @@ def _cors_headers(request: Request) -> dict:
         }
     return {}
 
+
+def _response_headers(request: Request) -> dict:
+    headers = _cors_headers(request)
+    request_id = _request_id(request)
+    if request_id:
+        headers["X-Request-ID"] = request_id
+    headers["X-App-Version"] = settings.APP_VERSION
+    return headers
+
+
 async def custom_http_exception_handler(request: Request, exc: Exception, status_code: int = status.HTTP_500_INTERNAL_SERVER_ERROR, code: str = "INTERNAL_ERROR"):
     """
     Base exception handler formatting errors according to the API Specification.
@@ -32,7 +58,8 @@ async def custom_http_exception_handler(request: Request, exc: Exception, status
         method=request.method,
         status_code=status_code,
         error_code=code,
-        error_message=message
+        error_message=message,
+        request_id=_request_id(request),
     )
     
     return JSONResponse(
@@ -44,10 +71,11 @@ async def custom_http_exception_handler(request: Request, exc: Exception, status
                 "message": public_message,
                 "details": []
             },
-            "meta": {}
+            "meta": _response_meta(request)
         },
-        headers=_cors_headers(request)
+        headers=_response_headers(request)
     )
+
 
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     """
@@ -59,7 +87,8 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
         path=request.url.path,
         method=request.method,
         status_code=exc.status_code,
-        detail=exc.detail
+        detail=exc.detail,
+        request_id=_request_id(request),
     )
 
     detail = exc.detail
@@ -79,10 +108,11 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
         content={
             "success": False,
             "error": error_block,
-            "meta": {}
+            "meta": _response_meta(request)
         },
-        headers={**(exc.headers or {}), **_cors_headers(request)}
+        headers={**(exc.headers or {}), **_response_headers(request)}
     )
+
 
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """
@@ -93,7 +123,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         "validation_error",
         path=request.url.path,
         method=request.method,
-        details=details
+        details=details,
+        request_id=_request_id(request),
     )
     
     return JSONResponse(
@@ -105,7 +136,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                 "message": "Request validation failed.",
                 "details": details
             },
-            "meta": {}
+            "meta": _response_meta(request)
         },
-        headers=_cors_headers(request)
+        headers=_response_headers(request)
     )

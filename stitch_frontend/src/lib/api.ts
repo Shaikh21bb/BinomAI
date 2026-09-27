@@ -3,11 +3,23 @@ const BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v
 class APIError extends Error {
   status: number;
   data: unknown;
-  constructor(message: string, status: number, data: unknown) {
+  requestId?: string;
+  constructor(message: string, status: number, data: unknown, requestId?: string) {
     super(message);
     this.status = status;
     this.data = data;
+    this.requestId = requestId;
   }
+}
+
+interface APIErrorPayload {
+  error?: { message?: string };
+  detail?: string | Array<{ msg?: string }>;
+  meta?: { request_id?: string };
+}
+
+function responseRequestId(response: Response, data: APIErrorPayload | null): string | undefined {
+  return response.headers.get('X-Request-ID') ?? data?.meta?.request_id;
 }
 
 function clearSessionAndRedirect() {
@@ -73,7 +85,7 @@ async function fetchWithAuth(url: string, options: RequestInit = {}) {
   }
 
   if (!response.ok) {
-    let data;
+    let data: APIErrorPayload | null;
     try {
       data = await response.json();
     } catch {
@@ -81,9 +93,9 @@ async function fetchWithAuth(url: string, options: RequestInit = {}) {
     }
     const message =
       (typeof data?.error?.message === 'string' ? data.error.message : null) ??
-      data?.detail ??
+      (typeof data?.detail === 'string' ? data.detail : null) ??
       'An error occurred';
-    throw new APIError(message, response.status, data);
+    throw new APIError(message, response.status, data, responseRequestId(response, data));
   }
 
   // Handle empty responses
@@ -131,7 +143,7 @@ export async function downloadFile(
   });
 
   if (!response.ok) {
-    let data: { error?: { message?: string }; detail?: unknown } | null = null;
+    let data: APIErrorPayload | null = null;
     try {
       data = await response.json();
     } catch {
@@ -141,7 +153,7 @@ export async function downloadFile(
       (typeof data?.error?.message === 'string' ? data.error.message : null) ??
       (typeof data?.detail === 'string' ? data.detail : null) ??
       'Ошибка скачивания';
-    throw new APIError(message, response.status, data);
+    throw new APIError(message, response.status, data, responseRequestId(response, data));
   }
 
   const blob = await response.blob();
@@ -168,7 +180,7 @@ export function downloadBlobPost(url: string, body: unknown, filename: string): 
 export interface ApiErrorShape {
   message?: string;
   status?: number;
-  data?: { detail?: string | Array<{ msg?: string }> };
+  data?: APIErrorPayload;
 }
 
 export function asError(err: unknown): ApiErrorShape {
@@ -179,7 +191,12 @@ export function errorMessage(err: unknown, fallback = 'Произошла оши
   if (err instanceof TypeError && err.message === 'Failed to fetch') {
     return 'Не удалось соединиться с сервером. Проверьте, что backend запущен (http://localhost:8000), и обновите страницу.';
   }
-  if (err instanceof APIError) return err.message || fallback;
+  if (err instanceof APIError) {
+    const message = err.message || fallback;
+    return err.status >= 500 && err.requestId
+      ? `${message} Код обращения: ${err.requestId}.`
+      : message;
+  }
   const e = asError(err);
   const detail = e.data?.detail;
   return (typeof detail === 'string' && detail) || e.message || fallback;

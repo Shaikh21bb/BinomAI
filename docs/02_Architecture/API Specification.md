@@ -34,6 +34,11 @@ Authorization: Bearer <access_token>
 
 ### 1.3 Стандартный формат ответа
 
+Каждый HTTP-ответ содержит `X-Request-ID` и `X-App-Version`. Безопасный входящий
+`X-Request-ID` сохраняется для сквозной трассировки; отсутствующее или некорректное
+значение заменяется сервером. В ошибках тот же идентификатор возвращается в
+`meta.request_id`, поэтому код обращения пользователя можно найти в structured logs.
+
 **Успешный ответ:**
 ```json
 {
@@ -1124,31 +1129,21 @@ wss://api.binom.ai/api/v1/ws/{project_id}?token=<access_token>
 **Response 200:**
 ```json
 {
-  "status": "healthy",
-  "version": "1.0.0",
-  "timestamp": "2026-07-09T12:00:00Z",
-  "services": {
-    "database": "healthy",
-    "redis": "healthy",
-    "gemini_api": "healthy",
-    "openai_api": "healthy",
-    "storage": "healthy"
-  }
+  "status": "ok",
+  "service": "binom-api",
+  "version": "1.3.1"
 }
 ```
+
+`GET /health/ready` дополнительно проверяет PostgreSQL, Redis, Celery, Supabase,
+AI-провайдера и JWT-конфигурацию. В production он возвращает только общий статус и
+версию, не раскрывая внутреннюю инфраструктуру.
 
 **Response 503 (если что-то не работает):**
 ```json
 {
-  "status": "degraded",
-  "services": {
-    "database": "healthy",
-    "redis": "healthy",
-    "gemini_api": "unhealthy",
-    "openai_api": "healthy",
-    "storage": "healthy"
-  },
-  "message": "AI analysis unavailable, using fallback"
+  "status": "error",
+  "version": "1.3.1"
 }
 ```
 

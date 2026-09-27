@@ -91,7 +91,7 @@
 # === APP SETTINGS ===
 APP_NAME=BINOM AI
 APP_ENV=production                    # development | staging | production
-APP_VERSION=1.0.0
+APP_VERSION=1.3.1
 DEBUG=false
 
 # === DATABASE (Supabase) ===
@@ -101,7 +101,7 @@ SUPABASE_SERVICE_KEY=eyJhbGciOiJIUzI1NiIs...     # Только для backend (
 DATABASE_URL=postgresql+asyncpg://postgres:password@db.xxxx.supabase.co:5432/postgres
 
 # === AUTH ===
-JWT_SECRET=your-super-secret-jwt-key-here
+SUPABASE_JWT_SECRET=your-supabase-jwt-secret-here
 JWT_ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=1440        # 24 часа
 REFRESH_TOKEN_EXPIRE_DAYS=30

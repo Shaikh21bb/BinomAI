@@ -63,6 +63,9 @@ async def test_health_live_200():
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
     assert resp.json()["service"] == "binom-api"
+    assert resp.json()["version"] == settings.APP_VERSION
+    assert resp.headers["X-App-Version"] == settings.APP_VERSION
+    assert resp.headers["X-Request-ID"].startswith("req_")
 
 
 @pytest.mark.asyncio
@@ -125,7 +128,7 @@ async def test_health_ready_hides_component_details_in_production():
             p.stop()
 
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    assert resp.json() == {"status": "ok", "version": settings.APP_VERSION}
 
 
 @pytest.mark.asyncio

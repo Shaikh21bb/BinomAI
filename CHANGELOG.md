@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.1 — 2026-09-27
+
+### Added
+
+- Safe request correlation IDs across response headers, structured logs, and API error metadata.
+- Application-version headers and versioned health responses for reliable production verification.
+- User-visible support codes for server-side failures.
+
+### Changed
+
+- Exposed tracing headers through CORS while rejecting unsafe client-supplied request IDs.
+
+### Verification
+
+- Added coverage for normal, unsafe-ID, 404, and unhandled-error request paths.
+
 ## 1.3.0 — 2026-09-27
 
 ### Added

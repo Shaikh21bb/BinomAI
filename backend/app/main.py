@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.core.logging import setup_logging
 from app.core.exceptions import custom_http_exception_handler, validation_exception_handler, http_exception_handler
 from app.core.redis import init_redis, close_redis
+from app.core.request_context import RequestContextMiddleware
 from app.core.supabase import supabase_admin
 from app.api.v1.api import api_router
 
@@ -127,7 +128,10 @@ def create_app() -> FastAPI:
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
+            expose_headers=["X-Request-ID", "X-App-Version"],
         )
+
+    app.add_middleware(RequestContextMiddleware)
 
     # Exception handlers
     app.add_exception_handler(Exception, custom_http_exception_handler)

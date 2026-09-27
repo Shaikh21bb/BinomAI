@@ -18,13 +18,14 @@ DEBUG_OWNER = RoleChecker(["owner"])
 @router.get("/health/live")
 async def health_live():
     """Liveness probe: the process is up and serving requests."""
-    return {"status": "ok", "service": "binom-api"}
+    return {"status": "ok", "service": "binom-api", "version": settings.APP_VERSION}
 
 @router.get("/health/ready")
 async def health_ready():
     """Readiness probe: checks DB, Redis and external integrations."""
     health_status = {
         "status": "ok",
+        "version": settings.APP_VERSION,
         "database": "unknown",
         "redis": "unknown",
         "celery": "unknown",
@@ -98,7 +99,11 @@ async def health_ready():
         health_status["jwt"] = "error (missing secret)"
 
     is_production = settings.APP_ENV.casefold() in {"prod", "production"}
-    response_body = {"status": health_status["status"]} if is_production else health_status
+    response_body = (
+        {"status": health_status["status"], "version": settings.APP_VERSION}
+        if is_production
+        else health_status
+    )
     return Response(
         content=json.dumps(response_body, ensure_ascii=False),
         media_type="application/json",
