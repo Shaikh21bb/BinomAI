@@ -43,12 +43,13 @@ CREATE INDEX IF NOT EXISTS idx_analysis_results_current   ON analysis_results(pr
 CREATE OR REPLACE FUNCTION ensure_single_current_analysis() RETURNS TRIGGER AS $$
 BEGIN
     IF NEW.is_current THEN
-        UPDATE analysis_results SET is_current = false
+        UPDATE public.analysis_results SET is_current = false
         WHERE project_id = NEW.project_id AND id <> NEW.id AND is_current = true;
     END IF;
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql
+SET search_path = public, pg_temp;
 
 DROP TRIGGER IF EXISTS trg_single_current_analysis ON analysis_results;
 CREATE TRIGGER trg_single_current_analysis
