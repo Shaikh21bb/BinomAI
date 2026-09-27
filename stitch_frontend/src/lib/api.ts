@@ -10,6 +10,14 @@ class APIError extends Error {
   }
 }
 
+function clearSessionAndRedirect() {
+  if (typeof window === 'undefined') return;
+  localStorage.removeItem('access_token');
+  localStorage.removeItem('refresh_token');
+  const loginUrl = new URL('/login', window.location.origin);
+  if (window.location.href !== loginUrl.href) window.location.assign(loginUrl);
+}
+
 async function fetchWithAuth(url: string, options: RequestInit = {}) {
   const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
   
@@ -54,24 +62,13 @@ async function fetchWithAuth(url: string, options: RequestInit = {}) {
           response = await fetch(`${BASE_URL}${url}`, config);
         } else {
           // Refresh failed
-          if (typeof window !== 'undefined') {
-            localStorage.removeItem('access_token');
-            localStorage.removeItem('refresh_token');
-            window.location.href = '/login';
-          }
+          clearSessionAndRedirect();
         }
       } catch {
-        if (typeof window !== 'undefined') {
-          localStorage.removeItem('access_token');
-          localStorage.removeItem('refresh_token');
-          window.location.href = '/login';
-        }
+        clearSessionAndRedirect();
       }
     } else {
-      if (typeof window !== 'undefined') {
-        localStorage.removeItem('access_token');
-        window.location.href = '/login';
-      }
+      clearSessionAndRedirect();
     }
   }
 

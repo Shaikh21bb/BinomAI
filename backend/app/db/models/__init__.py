@@ -11,5 +11,6 @@ from app.db.models.plan_request import PlanRequest
 from app.db.models.tender_lot import TenderLot
 from app.db.models.notification import Notification
 from app.db.models.sourcing import SourcingPlan, SupplierOffer
+from app.db.models.quick_check_report import QuickCheckReport
 
-__all__ = ["User", "Company", "Project", "Document", "ChatSession", "ChatMessage", "GeneratedDocument", "AnalysisResult", "ProductSearchItem", "Invite", "PlanRequest", "TenderLot", "Notification", "SourcingPlan", "SupplierOffer"]
+__all__ = ["User", "Company", "Project", "Document", "ChatSession", "ChatMessage", "GeneratedDocument", "AnalysisResult", "ProductSearchItem", "Invite", "PlanRequest", "TenderLot", "Notification", "SourcingPlan", "SupplierOffer", "QuickCheckReport"]
