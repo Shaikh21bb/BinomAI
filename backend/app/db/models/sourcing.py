@@ -5,6 +5,7 @@ from typing import Optional
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     ForeignKey,
     Index,
@@ -25,7 +26,18 @@ class SourcingPlan(Base):
     """Project-level commercial assumptions for supplier comparison."""
 
     __tablename__ = "sourcing_plans"
-    __table_args__ = (UniqueConstraint("project_id", name="uq_sourcing_plans_project"),)
+    __table_args__ = (
+        UniqueConstraint("project_id", name="uq_sourcing_plans_project"),
+        CheckConstraint(
+            "target_margin_pct >= 0 AND target_margin_pct < 95",
+            name="ck_sourcing_plans_margin",
+        ),
+        CheckConstraint("other_costs_kzt >= 0", name="ck_sourcing_plans_other_costs"),
+        CheckConstraint(
+            "contingency_pct >= 0 AND contingency_pct <= 100",
+            name="ck_sourcing_plans_contingency",
+        ),
+    )
 
     project_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), index=True, nullable=False
@@ -35,6 +47,12 @@ class SourcingPlan(Base):
     )
     target_margin_pct: Mapped[Decimal] = mapped_column(
         Numeric(5, 2), nullable=False, server_default="15"
+    )
+    other_costs_kzt: Mapped[Decimal] = mapped_column(
+        Numeric(18, 2), nullable=False, server_default="0"
+    )
+    contingency_pct: Mapped[Decimal] = mapped_column(
+        Numeric(5, 2), nullable=False, server_default="5"
     )
     base_currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default="KZT")
 

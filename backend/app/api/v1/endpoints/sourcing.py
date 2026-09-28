@@ -210,7 +210,16 @@ async def get_sourcing_comparison(
     )
     plan = (await db.execute(plan_stmt)).scalars().first()
     margin = plan.target_margin_pct if plan else Decimal("15")
-    return build_comparison(project, items, offers, margin)
+    other_costs = plan.other_costs_kzt if plan else Decimal("0")
+    contingency = plan.contingency_pct if plan else Decimal("5")
+    return build_comparison(
+        project,
+        items,
+        offers,
+        margin,
+        other_costs_kzt=other_costs,
+        contingency_pct=contingency,
+    )
 
 
 @router.patch("/{project_id}/sourcing/settings")
@@ -226,17 +235,37 @@ async def update_sourcing_settings(
     )
     plan = (await db.execute(stmt)).scalars().first()
     if plan:
-        plan.target_margin_pct = payload.target_margin_pct
+        for field, value in payload.model_dump(exclude_unset=True).items():
+            setattr(plan, field, value)
     else:
         plan = SourcingPlan(
             project_id=project_id,
             company_id=current_user.company_id,
-            target_margin_pct=payload.target_margin_pct,
+            target_margin_pct=(
+                payload.target_margin_pct
+                if payload.target_margin_pct is not None
+                else Decimal("15")
+            ),
+            other_costs_kzt=(
+                payload.other_costs_kzt
+                if payload.other_costs_kzt is not None
+                else Decimal("0")
+            ),
+            contingency_pct=(
+                payload.contingency_pct
+                if payload.contingency_pct is not None
+                else Decimal("5")
+            ),
             base_currency="KZT",
         )
         db.add(plan)
         await db.flush()
-    return {"target_margin_pct": plan.target_margin_pct, "base_currency": plan.base_currency}
+    return {
+        "target_margin_pct": plan.target_margin_pct,
+        "other_costs_kzt": plan.other_costs_kzt,
+        "contingency_pct": plan.contingency_pct,
+        "base_currency": plan.base_currency,
+    }
 
 
 @router.post("/{project_id}/sourcing/items", status_code=201)

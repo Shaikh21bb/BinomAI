@@ -15,7 +15,7 @@
 **Казахстан • Строительство • AI**
 
 [![Status](https://img.shields.io/badge/Status-Production-success?style=for-the-badge)](https://binom-ai-vprod.vercel.app)
-[![Release](https://img.shields.io/badge/Release-v1.3.1-blue?style=for-the-badge)](https://github.com/Shaikh21bb/BinomAI/releases)
+[![Release](https://img.shields.io/badge/Release-v1.4.0-blue?style=for-the-badge)](https://github.com/Shaikh21bb/BinomAI/releases)
 [![Market](https://img.shields.io/badge/Market-Kazakhstan-green?style=for-the-badge)](/)
 [![Stack](https://img.shields.io/badge/Stack-Next.js%20%7C%20FastAPI%20%7C%20Supabase%20%7C%20AI-purple?style=for-the-badge)](/)
 

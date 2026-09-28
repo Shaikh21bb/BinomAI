@@ -230,11 +230,15 @@ def evaluate_offer(
     elif offer.compliance_status == "unknown":
         flags.append(_flag("unknown_compliance", "error", "Соответствие техническому заданию не проверено"))
 
+    goods_cost_kzt: Optional[Decimal] = None
+    delivery_cost_kzt: Optional[Decimal] = None
     landed: Optional[Decimal] = None
     if purchased_qty is not None and rate is not None and vat_multiplier is not None and price_quantity > ZERO:
         goods = purchased_qty * _decimal(offer.unit_price, ZERO) / price_quantity
         delivery = _decimal(offer.delivery_cost, ZERO) or ZERO
-        landed = (goods + delivery) * rate * vat_multiplier
+        goods_cost_kzt = goods * rate * vat_multiplier
+        delivery_cost_kzt = delivery * rate * vat_multiplier
+        landed = goods_cost_kzt + delivery_cost_kzt
 
     error_codes = {flag["code"] for flag in flags if flag["level"] == "error"}
     eligible = landed is not None and not error_codes
@@ -251,6 +255,8 @@ def evaluate_offer(
         "offer": _offer_dict(offer),
         "required_offer_quantity": float(required_offer_qty) if required_offer_qty is not None else None,
         "purchased_quantity": float(purchased_qty) if purchased_qty is not None else None,
+        "goods_cost_kzt": _round_money(goods_cost_kzt),
+        "delivery_cost_kzt": _round_money(delivery_cost_kzt),
         "landed_cost_kzt": _round_money(landed),
         "landed_unit_cost_kzt": _round_money(landed / required) if landed is not None and required else None,
         "score": 0.0,
@@ -280,6 +286,9 @@ def build_comparison(
     offers: list[SupplierOffer],
     target_margin_pct: Decimal,
     today: Optional[date] = None,
+    *,
+    other_costs_kzt: Decimal = ZERO,
+    contingency_pct: Decimal = Decimal("5"),
 ) -> dict[str, Any]:
     today = today or datetime.now(timezone.utc).date()
     offers_by_item: dict[Any, list[SupplierOffer]] = {}
@@ -291,6 +300,8 @@ def build_comparison(
             offers_by_item.setdefault(offer.item_id, []).append(offer)
 
     item_rows = []
+    chosen_goods_total = ZERO
+    chosen_delivery_total = ZERO
     chosen_total = ZERO
     covered_items = 0
     for item in items:
@@ -321,6 +332,8 @@ def build_comparison(
         recommended = next((row for row in evaluated if row["eligible"]), None)
         selected = next((row for row in evaluated if row["offer"]["is_selected"]), None) or recommended
         if selected and selected["landed_cost_kzt"] is not None:
+            chosen_goods_total += Decimal(str(selected["goods_cost_kzt"] or 0))
+            chosen_delivery_total += Decimal(str(selected["delivery_cost_kzt"] or 0))
             chosen_total += Decimal(str(selected["landed_cost_kzt"]))
             covered_items += 1
 
@@ -342,8 +355,16 @@ def build_comparison(
             "selection_is_manual": bool(selected and selected["offer"]["is_selected"]),
         })
 
-    margin = _decimal(target_margin_pct, Decimal("15")) or Decimal("15")
-    estimated_bid = chosen_total / (ONE - margin / Decimal("100")) if covered_items and margin < 100 else ZERO
+    parsed_margin = _decimal(target_margin_pct, Decimal("15"))
+    margin = parsed_margin if parsed_margin is not None else Decimal("15")
+    other_costs = _decimal(other_costs_kzt, ZERO) or ZERO
+    contingency = _decimal(contingency_pct, Decimal("5")) or ZERO
+    cost_before_reserve = chosen_total + other_costs
+    contingency_cost = cost_before_reserve * contingency / Decimal("100")
+    total_cost = cost_before_reserve + contingency_cost
+    estimated_bid = total_cost / (ONE - margin / Decimal("100")) if covered_items and margin < 100 else ZERO
+    estimated_profit = estimated_bid - total_cost
+    estimated_markup = estimated_profit / total_cost * Decimal("100") if total_cost > ZERO else ZERO
     incomplete = max(0, len(items) - covered_items)
     return {
         "project": {
@@ -352,18 +373,32 @@ def build_comparison(
             "deadline_at": project.deadline_at,
             "customer_name": project.customer_name,
         },
-        "settings": {"target_margin_pct": margin, "base_currency": "KZT"},
+        "settings": {
+            "target_margin_pct": margin,
+            "other_costs_kzt": other_costs,
+            "contingency_pct": contingency,
+            "base_currency": "KZT",
+        },
         "items": item_rows,
         "unmatched_offers": unmatched,
         "summary": {
             "line_items": len(items),
             "covered_items": covered_items,
             "incomplete_items": incomplete,
+            "goods_cost_kzt": _round_money(chosen_goods_total),
+            "delivery_cost_kzt": _round_money(chosen_delivery_total),
             "estimated_cost_kzt": _round_money(chosen_total),
+            "other_costs_kzt": _round_money(other_costs),
+            "contingency_pct": _round_money(contingency),
+            "contingency_kzt": _round_money(contingency_cost),
+            "estimated_total_cost_kzt": _round_money(total_cost),
             "estimated_bid_kzt": _round_money(estimated_bid) if covered_items else None,
-            "estimated_profit_kzt": _round_money(estimated_bid - chosen_total) if covered_items else None,
+            "estimated_profit_kzt": _round_money(estimated_profit) if covered_items else None,
+            "estimated_margin_pct": _round_money(margin) if covered_items else None,
+            "estimated_markup_pct": _round_money(estimated_markup) if covered_items else None,
             "is_complete": incomplete == 0 and len(items) > 0,
-            "caveat": "Расчёт является оценкой и требует проверки условий КП, налогов, наличия и логистики." + (" Не все позиции покрыты." if incomplete else ""),
+            "caveat": "Расчёт является оценкой и требует проверки условий КП, налогов, наличия и логистики."
+            + (f" Не рассчитано позиций: {incomplete}." if incomplete else " Все позиции покрыты выбранными предложениями."),
         },
     }
 

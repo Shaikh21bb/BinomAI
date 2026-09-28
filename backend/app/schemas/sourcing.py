@@ -152,7 +152,24 @@ class SupplierOfferUpdate(BaseModel):
 
 
 class SourcingPlanUpdate(BaseModel):
-    target_margin_pct: Decimal = Field(ge=0, lt=95)
+    target_margin_pct: Optional[Decimal] = Field(default=None, ge=0, lt=95)
+    other_costs_kzt: Optional[Decimal] = Field(
+        default=None,
+        ge=0,
+        le=Decimal("9999999999999999.99"),
+    )
+    contingency_pct: Optional[Decimal] = Field(default=None, ge=0, le=100)
+
+    @model_validator(mode="after")
+    def require_at_least_one_setting(self):
+        if not self.model_fields_set:
+            raise ValueError("At least one sourcing setting is required")
+        null_fields = [
+            field for field in self.model_fields_set if getattr(self, field) is None
+        ]
+        if null_fields:
+            raise ValueError(f"Settings cannot be null: {', '.join(sorted(null_fields))}")
+        return self
 
 
 class SupplierOfferResponse(BaseModel):

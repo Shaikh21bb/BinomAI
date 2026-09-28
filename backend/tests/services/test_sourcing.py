@@ -13,7 +13,7 @@ from app.services.sourcing import (
     parse_quote_file,
     quote_row_payload,
 )
-from app.schemas.sourcing import SupplierOfferCreate, SupplierOfferUpdate
+from app.schemas.sourcing import SourcingPlanUpdate, SupplierOfferCreate, SupplierOfferUpdate
 from pydantic import ValidationError
 
 
@@ -105,7 +105,14 @@ def test_compliant_offer_beats_cheaper_noncompliant_offer():
     cheap = offer(line, "Слишком дёшево", 80, "noncompliant")
     sound = offer(line, "Проверенный поставщик", 100, "compliant")
 
-    result = build_comparison(project(), [line], [cheap, sound], Decimal("20"), today=date(2026, 9, 23))
+    result = build_comparison(
+        project(),
+        [line],
+        [cheap, sound],
+        Decimal("20"),
+        today=date(2026, 9, 23),
+        contingency_pct=Decimal("0"),
+    )
 
     row = result["items"][0]
     assert row["recommended_offer_id"] == sound.id
@@ -115,6 +122,69 @@ def test_compliant_offer_beats_cheaper_noncompliant_offer():
     assert result["summary"]["estimated_profit_kzt"] == 2500.0
     cheap_result = next(entry for entry in row["offers"] if entry["offer"]["id"] == cheap.id)
     assert "noncompliant" in {flag["code"] for flag in cheap_result["flags"]}
+
+
+def test_financial_summary_includes_delivery_overheads_reserve_and_markup():
+    line = item()
+    quoted = offer(line, "Проверенный поставщик", 100)
+    quoted.delivery_cost = Decimal("500")
+
+    result = build_comparison(
+        project(),
+        [line],
+        [quoted],
+        Decimal("20"),
+        today=date(2026, 9, 23),
+        other_costs_kzt=Decimal("2000"),
+        contingency_pct=Decimal("10"),
+    )
+
+    summary = result["summary"]
+    assert summary["goods_cost_kzt"] == 10000.0
+    assert summary["delivery_cost_kzt"] == 500.0
+    assert summary["estimated_cost_kzt"] == 10500.0
+    assert summary["other_costs_kzt"] == 2000.0
+    assert summary["contingency_kzt"] == 1250.0
+    assert summary["estimated_total_cost_kzt"] == 13750.0
+    assert summary["estimated_bid_kzt"] == 17187.5
+    assert summary["estimated_profit_kzt"] == 3437.5
+    assert summary["estimated_margin_pct"] == 20.0
+    assert summary["estimated_markup_pct"] == 25.0
+
+
+def test_financial_settings_require_a_value_and_reject_negative_costs():
+    for payload in (
+        {},
+        {"target_margin_pct": None},
+        {"other_costs_kzt": -1},
+        {"contingency_pct": 101},
+    ):
+        try:
+            SourcingPlanUpdate(**payload)
+        except ValidationError:
+            pass
+        else:
+            raise AssertionError(f"Invalid settings accepted: {payload}")
+
+
+def test_zero_margin_and_reserve_are_respected():
+    line = item()
+    quoted = offer(line, "Проверенный поставщик", 100)
+
+    result = build_comparison(
+        project(),
+        [line],
+        [quoted],
+        Decimal("0"),
+        today=date(2026, 9, 23),
+        contingency_pct=Decimal("0"),
+    )
+
+    assert result["summary"]["estimated_total_cost_kzt"] == 10000.0
+    assert result["summary"]["estimated_bid_kzt"] == 10000.0
+    assert result["summary"]["estimated_profit_kzt"] == 0.0
+    assert result["summary"]["estimated_margin_pct"] == 0.0
+    assert result["summary"]["estimated_markup_pct"] == 0.0
 
 
 def test_suspiciously_cheap_offer_is_flagged_but_explained():

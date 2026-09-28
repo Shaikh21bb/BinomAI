@@ -1131,7 +1131,7 @@ wss://api.binom.ai/api/v1/ws/{project_id}?token=<access_token>
 {
   "status": "ok",
   "service": "binom-api",
-  "version": "1.3.1"
+  "version": "1.4.0"
 }
 ```
 
@@ -1143,7 +1143,7 @@ AI-провайдера и JWT-конфигурацию. В production он во
 ```json
 {
   "status": "error",
-  "version": "1.3.1"
+  "version": "1.4.0"
 }
 ```
 

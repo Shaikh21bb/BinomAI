@@ -36,7 +36,10 @@ The backend uses deterministic calculations rather than an LLM:
 4. Recommendations exclude noncompliant offers, unsafe conversions, expired quotes, insufficient availability, missing exchange rates, and deadline failures.
 5. Eligible offers are scored using compliance (45%), economics (30%), delivery (15%), and assurance/freshness evidence (10%). Lowest price alone cannot make an offer eligible.
 6. The UI flags stale or unknown prices, suspiciously cheap offers, missing characteristics, certificates and warranty, unknown availability, and delivery risk.
-7. A user can override the recommendation. The chosen sourcing combination and target margin feed the estimated bid and profit; incomplete positions remain clearly marked.
+7. A user can override the recommendation. The chosen sourcing combination feeds a project financial summary with separate goods, delivery, other-project-cost, and risk-reserve amounts.
+8. The final estimate calculates full project cost, bid price, planned profit, gross margin, and markup. Margin is profit divided by the bid price; markup is profit divided by cost. Incomplete positions remain clearly marked and are excluded from the known-cost total.
+
+Project financial assumptions are stored on `sourcing_plans`: `other_costs_kzt` covers work, documents, guarantees, subcontractors, or other costs outside supplier quotes, while `contingency_pct` applies a configurable reserve to supplier and other costs. The default reserve is 5% and can be set to zero.
 
 ## API and deployment
 

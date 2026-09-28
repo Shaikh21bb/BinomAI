@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.4.0 — 2026-09-28
+
+### Added
+
+- Project financial summary with separate goods, delivery, other costs, and risk-reserve amounts.
+- Full-cost, bid-price, planned-profit, gross-margin, and markup calculations based on selected supplier offers.
+- Persistent project-level assumptions for other costs and contingency percentage.
+
+### Changed
+
+- Supplier comparison now shows an explicit completeness status and warns when uncovered positions are excluded from the estimate.
+- Financial inputs are validated in the UI, API, and PostgreSQL schema.
+
+### Verification
+
+- 239 backend tests, frontend lint, TypeScript checks, production build, migration validation, and browser-to-database verification pass.
+
 ## 1.3.1 — 2026-09-27
 
 ### Added

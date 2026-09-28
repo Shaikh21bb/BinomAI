@@ -91,7 +91,7 @@
 # === APP SETTINGS ===
 APP_NAME=BINOM AI
 APP_ENV=production                    # development | staging | production
-APP_VERSION=1.3.1
+APP_VERSION=1.4.0
 DEBUG=false
 
 # === DATABASE (Supabase) ===

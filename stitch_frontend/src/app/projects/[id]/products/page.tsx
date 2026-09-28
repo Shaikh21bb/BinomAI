@@ -74,16 +74,29 @@ interface ItemComparison {
 }
 interface Comparison {
   project: { id: string; name: string; deadline_at?: string | null };
-  settings: { target_margin_pct: Numberish; base_currency: string };
+  settings: {
+    target_margin_pct: Numberish;
+    other_costs_kzt?: Numberish;
+    contingency_pct?: Numberish;
+    base_currency: string;
+  };
   items: ItemComparison[];
   unmatched_offers: Offer[];
   summary: {
     line_items: number;
     covered_items: number;
     incomplete_items: number;
+    goods_cost_kzt?: number | null;
+    delivery_cost_kzt?: number | null;
     estimated_cost_kzt?: number | null;
+    other_costs_kzt?: number | null;
+    contingency_pct?: number | null;
+    contingency_kzt?: number | null;
+    estimated_total_cost_kzt?: number | null;
     estimated_bid_kzt?: number | null;
     estimated_profit_kzt?: number | null;
+    estimated_margin_pct?: number | null;
+    estimated_markup_pct?: number | null;
     is_complete: boolean;
     caveat: string;
   };
@@ -193,6 +206,8 @@ export default function ProjectProductsPage() {
   const [modal, setModal] = useState<'item' | 'offer' | 'rfq' | null>(null);
   const [rfq, setRfq] = useState<RfqDraft | null>(null);
   const [margin, setMargin] = useState('15');
+  const [otherCosts, setOtherCosts] = useState('0');
+  const [contingency, setContingency] = useState('5');
   const [addingDiscoveryUrl, setAddingDiscoveryUrl] = useState<string | null>(null);
   const [offerToDelete, setOfferToDelete] = useState<Offer | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -203,6 +218,8 @@ export default function ProjectProductsPage() {
       const result = (await api.get(`/projects/${projectId}/sourcing`)) as Comparison;
       setData(result);
       setMargin(String(result.settings.target_margin_pct ?? 15));
+      setOtherCosts(String(result.settings.other_costs_kzt ?? 0));
+      setContingency(String(result.settings.contingency_pct ?? 5));
       setError('');
       return result;
     } catch (err) {
@@ -418,13 +435,33 @@ export default function ProjectProductsPage() {
       if (fileRef.current) fileRef.current.value = '';
     }
   }
-  async function saveMargin() {
+  async function saveFinancialSettings() {
+    const targetMargin = Number(margin);
+    const projectCosts = Number(otherCosts);
+    const riskReserve = Number(contingency);
+    if (
+      !Number.isFinite(targetMargin) ||
+      !Number.isFinite(projectCosts) ||
+      !Number.isFinite(riskReserve) ||
+      targetMargin < 0 ||
+      targetMargin >= 95 ||
+      projectCosts < 0 ||
+      riskReserve < 0 ||
+      riskReserve > 100
+    ) {
+      setError(
+        'Маржа должна быть от 0 до 94,99%, резерв — от 0 до 100%, расходы — неотрицательными.'
+      );
+      return;
+    }
     await run(
       () =>
         api.patch(`/projects/${projectId}/sourcing/settings`, {
-          target_margin_pct: Number(margin),
+          target_margin_pct: targetMargin,
+          other_costs_kzt: projectCosts,
+          contingency_pct: riskReserve,
         }),
-      'Целевая маржа сохранена.'
+      'Финансовые параметры сохранены, расчёт обновлён.'
     );
   }
   async function selectOffer(offerId: string) {
@@ -569,58 +606,173 @@ export default function ProjectProductsPage() {
           </div>
         </section>
         {data && data.summary.line_items > 0 && (
-          <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-            <div className="rounded-xl border border-outline-variant bg-surface p-4">
-              <p className="text-label-md text-on-surface-variant">Покрыто позиций</p>
-              <p className="mt-1 text-headline-md font-headline-md">
-                {data.summary.covered_items} / {data.summary.line_items}
-              </p>
-            </div>
-            <div className="rounded-xl border border-outline-variant bg-surface p-4">
-              <p className="text-label-md text-on-surface-variant">Оценочная себестоимость</p>
-              <p className="mt-1 text-headline-md font-headline-md">
-                {money(data.summary.estimated_cost_kzt)}
-              </p>
-            </div>
-            <div className="rounded-xl border border-outline-variant bg-surface p-4">
-              <p className="text-label-md text-on-surface-variant">Оценочная цена заявки</p>
-              <p className="mt-1 text-headline-md font-headline-md">
-                {money(data.summary.estimated_bid_kzt)}
-              </p>
-            </div>
-            <div className="rounded-xl border border-outline-variant bg-surface p-4">
-              <p className="text-label-md text-on-surface-variant">Оценочная прибыль</p>
-              <p className="mt-1 text-headline-md font-headline-md">
-                {money(data.summary.estimated_profit_kzt)}
-              </p>
-            </div>
-            <div className="rounded-xl border border-outline-variant bg-surface p-4">
-              <label htmlFor="margin" className="text-label-md text-on-surface-variant">
-                Целевая маржа, %
-              </label>
-              <div className="mt-1 flex gap-2">
-                <input
-                  id="margin"
-                  className={fieldClass}
-                  type="number"
-                  min="0"
-                  max="94.99"
-                  step="0.1"
-                  value={margin}
-                  onChange={(event) => setMargin(event.target.value)}
-                />
-                <button
-                  className={secondaryButton}
-                  onClick={() => void saveMargin()}
-                  aria-label="Сохранить маржу"
+          <section className="overflow-hidden rounded-2xl border border-outline-variant bg-surface">
+            <div className="border-b border-outline-variant bg-surface-container-low p-5 sm:p-6">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-label-md font-label-md uppercase tracking-wide text-primary">
+                    Финансовый итог проекта
+                  </p>
+                  <h2 className="mt-1 text-headline-sm font-headline-sm text-on-surface">
+                    От закупки до плановой прибыли
+                  </h2>
+                </div>
+                <div
+                  className={`rounded-full px-3 py-1 text-label-md font-label-md ${
+                    data.summary.is_complete
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : 'bg-amber-100 text-amber-900'
+                  }`}
                 >
-                  <span className="material-symbols-outlined text-[18px]">check</span>
-                </button>
+                  {data.summary.is_complete
+                    ? 'Все позиции рассчитаны'
+                    : `Не рассчитано: ${data.summary.incomplete_items}`}
+                </div>
+              </div>
+
+              <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded-xl border border-outline-variant bg-surface p-4">
+                  <p className="text-label-md text-on-surface-variant">Полная себестоимость</p>
+                  <p className="mt-1 text-headline-md font-headline-md text-on-surface">
+                    {money(data.summary.estimated_total_cost_kzt)}
+                  </p>
+                  <p className="mt-1 text-body-sm text-on-surface-variant">
+                    товары, доставка, расходы и резерв
+                  </p>
+                </div>
+                <div className="rounded-xl border border-outline-variant bg-surface p-4">
+                  <p className="text-label-md text-on-surface-variant">Цена предложения</p>
+                  <p className="mt-1 text-headline-md font-headline-md text-on-surface">
+                    {money(data.summary.estimated_bid_kzt)}
+                  </p>
+                  <p className="mt-1 text-body-sm text-on-surface-variant">
+                    при марже {data.summary.estimated_margin_pct ?? '—'}%
+                  </p>
+                </div>
+                <div className="rounded-xl border border-outline-variant bg-surface p-4">
+                  <p className="text-label-md text-on-surface-variant">Плановая прибыль</p>
+                  <p className="mt-1 text-headline-md font-headline-md text-emerald-700">
+                    {money(data.summary.estimated_profit_kzt)}
+                  </p>
+                  <p className="mt-1 text-body-sm text-on-surface-variant">
+                    наценка {data.summary.estimated_markup_pct ?? '—'}%
+                  </p>
+                </div>
+                <div className="rounded-xl border border-outline-variant bg-surface p-4">
+                  <p className="text-label-md text-on-surface-variant">Покрытие сметы</p>
+                  <p className="mt-1 text-headline-md font-headline-md text-on-surface">
+                    {data.summary.covered_items} / {data.summary.line_items}
+                  </p>
+                  <p className="mt-1 text-body-sm text-on-surface-variant">
+                    позиций с выбранным предложением
+                  </p>
+                </div>
               </div>
             </div>
-            <p className="text-body-sm text-on-surface-variant sm:col-span-2 lg:col-span-5">
+
+            <div className="grid gap-6 p-5 sm:p-6 lg:grid-cols-[1.2fr_1fr]">
+              <div>
+                <h3 className="text-title-md font-title-md text-on-surface">
+                  Структура себестоимости
+                </h3>
+                <dl className="mt-3 divide-y divide-outline-variant rounded-xl border border-outline-variant bg-surface-container-lowest px-4">
+                  {[
+                    ['Товары по выбранным КП', data.summary.goods_cost_kzt],
+                    ['Доставка', data.summary.delivery_cost_kzt],
+                    ['Прочие расходы проекта', data.summary.other_costs_kzt],
+                    [
+                      `Резерв на риски (${data.summary.contingency_pct ?? 0}%)`,
+                      data.summary.contingency_kzt,
+                    ],
+                  ].map(([label, value]) => (
+                    <div
+                      key={String(label)}
+                      className="flex items-center justify-between gap-4 py-3"
+                    >
+                      <dt className="text-body-md text-on-surface-variant">{label}</dt>
+                      <dd className="text-body-md font-semibold text-on-surface">
+                        {money(value as Numberish)}
+                      </dd>
+                    </div>
+                  ))}
+                  <div className="flex items-center justify-between gap-4 py-3">
+                    <dt className="text-title-sm font-title-sm text-on-surface">
+                      Итого себестоимость
+                    </dt>
+                    <dd className="text-title-md font-title-md text-on-surface">
+                      {money(data.summary.estimated_total_cost_kzt)}
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+
+              <div>
+                <h3 className="text-title-md font-title-md text-on-surface">Параметры расчёта</h3>
+                <div className="mt-3 grid gap-3 sm:grid-cols-3 lg:grid-cols-1 xl:grid-cols-3">
+                  <label className="text-label-md text-on-surface-variant" htmlFor="other-costs">
+                    Прочие расходы, ₸
+                    <input
+                      id="other-costs"
+                      className={`${fieldClass} mt-1`}
+                      type="number"
+                      min="0"
+                      step="1000"
+                      value={otherCosts}
+                      onChange={(event) => setOtherCosts(event.target.value)}
+                    />
+                  </label>
+                  <label className="text-label-md text-on-surface-variant" htmlFor="contingency">
+                    Резерв, %
+                    <input
+                      id="contingency"
+                      className={`${fieldClass} mt-1`}
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="0.1"
+                      value={contingency}
+                      onChange={(event) => setContingency(event.target.value)}
+                    />
+                  </label>
+                  <label className="text-label-md text-on-surface-variant" htmlFor="margin">
+                    Целевая маржа, %
+                    <input
+                      id="margin"
+                      className={`${fieldClass} mt-1`}
+                      type="number"
+                      min="0"
+                      max="94.99"
+                      step="0.1"
+                      value={margin}
+                      onChange={(event) => setMargin(event.target.value)}
+                    />
+                  </label>
+                </div>
+                <button
+                  type="button"
+                  className={`${primaryButton} mt-3 w-full`}
+                  onClick={() => void saveFinancialSettings()}
+                  disabled={working}
+                >
+                  <span className="material-symbols-outlined text-[18px]">calculate</span>
+                  Сохранить и пересчитать
+                </button>
+                <p className="mt-3 text-body-sm text-on-surface-variant">
+                  Маржа считается от цены предложения. Наценка показывает прибыль относительно
+                  полной себестоимости.
+                </p>
+              </div>
+            </div>
+
+            <div
+              className={`border-t px-5 py-3 text-body-sm sm:px-6 ${
+                data.summary.is_complete
+                  ? 'border-outline-variant bg-surface-container-low text-on-surface-variant'
+                  : 'border-amber-200 bg-amber-50 text-amber-950'
+              }`}
+            >
               {data.summary.caveat}
-            </p>
+            </div>
           </section>
         )}
         {!!data?.unmatched_offers.length && (
