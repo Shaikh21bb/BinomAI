@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.4.1 — 2026-09-30
+
+### Fixed
+
+- Quick Check now recognizes numbered Satu product URLs as concrete product pages instead of catalog pages.
+- Direct product links remain visible as clearly marked unverified candidates when a seller blocks automated page reads.
+- Targeted fallback search now checks both Kaspi and Satu for concrete product pages.
+
+### Safety
+
+- Unverified candidates never contribute prices, photos, or specifications to automatic supplier comparisons.
+- Automatic comparison still accepts only verified product pages with a valid price.
+
+### Verification
+
+- 241 backend tests, frontend lint, TypeScript checks, and the production Webpack build pass.
+
 ## 1.4.0 — 2026-09-28
 
 ### Added

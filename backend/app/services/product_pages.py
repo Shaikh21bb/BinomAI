@@ -36,6 +36,14 @@ def is_public_url(url: str) -> bool:
         return "." in host
 
 
+def looks_like_product_url(url: str) -> bool:
+    """Identify a concrete product URL without claiming that its page was fetched."""
+    if not is_public_url(url):
+        return False
+    path = urlparse(url).path
+    return not _GENERIC_PATH.search(path) and bool(_PRODUCT_PATH.search(path))
+
+
 async def _resolves_publicly(url: str) -> bool:
     parsed = urlparse(url)
     if not is_public_url(url):
@@ -205,7 +213,11 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
     path = urlparse(page_url).path
     # Satu's top-level *.html pages are collections. Their JSON-LD often
     # contains an unrelated featured Product with its own photo and price.
-    if urlparse(page_url).hostname in {"satu.kz", "www.satu.kz"} and re.fullmatch(r"/[^/]+\.html", path, re.I):
+    if (
+        urlparse(page_url).hostname in {"satu.kz", "www.satu.kz"}
+        and re.fullmatch(r"/[^/]+\.html", path, re.I)
+        and not re.match(r"/p\d+(?:-|/)", path, re.I)
+    ):
         return {"is_product_page": False, "page_verified": True}
     page_title = _clean(parser.meta.get("og:title") or parser.title)
     product_name = _clean((product or {}).get("name"))
@@ -221,7 +233,7 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
     )
     is_product = not _GENERIC_PATH.search(path) and (
         (bool(product) and name_on_page)
-        or bool(_PRODUCT_PATH.search(path))
+        or looks_like_product_url(page_url)
         or concrete_catalog_leaf
     )
     if not is_product:

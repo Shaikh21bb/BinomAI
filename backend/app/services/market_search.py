@@ -5,7 +5,7 @@ import httpx
 from typing import List, Dict, Any, Optional
 
 from app.core.config import settings
-from app.services.product_pages import fetch_product_page
+from app.services.product_pages import fetch_product_page, looks_like_product_url
 
 logger = structlog.get_logger(__name__)
 
@@ -57,9 +57,20 @@ async def search_products(query: str, region: Optional[str] = None) -> List[Dict
     # marketplace product-page query gives concrete items to inspect.
     try:
         marketplace_query = re.sub(r"моющее средство для посуды", "средство для мытья посуды", query, flags=re.I)
-        targeted = await _duckduckgo(f"{marketplace_query.split(';')[0][:85]} site:kaspi.kz/shop/p/", None)
-        concrete_urls = [row for row in targeted if "/shop/p/" in (row.get("url") or "")]
-        candidates = await enrich_product_pages(concrete_urls[:6])
+        short_query = marketplace_query.split(";")[0][:85]
+        targeted_batches = await asyncio.gather(
+            _duckduckgo(f"{short_query} site:kaspi.kz/shop/p/", None),
+            _duckduckgo(f"{short_query} site:satu.kz/p", None),
+            return_exceptions=True,
+        )
+        concrete_urls = _unique_results([
+            row
+            for batch in targeted_batches
+            if isinstance(batch, list)
+            for row in batch
+            if looks_like_product_url(row.get("url") or "")
+        ])
+        candidates = await enrich_product_pages(concrete_urls[:8])
         results = _unique_results(candidates + results)
     except Exception as e:
         logger.warning("targeted_product_search_failed", error_type=type(e).__name__)
@@ -168,7 +179,9 @@ async def enrich_product_pages(results: List[Dict[str, Any]], limit: int = 8) ->
     async with httpx.AsyncClient(timeout=8.0, headers={"User-Agent": "Mozilla/5.0 (compatible; BinomProductResearch/1.0)"}) as client:
         async def enrich(result: Dict[str, Any]) -> None:
             async with semaphore:
-                page = await fetch_product_page(result.get("url") or "", client)
+                url = result.get("url") or ""
+                direct_product_candidate = looks_like_product_url(url)
+                page = await fetch_product_page(url, client)
                 result.update(page)
                 if page.get("is_product_page") and page.get("page_verified"):
                     result["title"] = page.get("title") or result.get("title")
@@ -176,6 +189,11 @@ async def enrich_product_pages(results: List[Dict[str, Any]], limit: int = 8) ->
                     result["price"] = page.get("price")
                     result["currency"] = page.get("currency")
                 else:
+                    # A vendor may block automated reads even though the search result
+                    # points to a concrete product URL. Keep it visible as an explicitly
+                    # unverified candidate, without inventing price, photo, or specs.
+                    result["is_product_page"] = direct_product_candidate
+                    result["page_verified"] = False
                     result["image_url"] = None
                     result["price"] = None
                     result["currency"] = None

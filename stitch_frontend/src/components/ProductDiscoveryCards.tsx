@@ -47,7 +47,7 @@ export function isVerifiedProductLead(lead: DiscoveryLead) {
 }
 
 export function isProductCardLead(lead: DiscoveryLead) {
-  return Boolean(lead.is_product_page && lead.page_verified);
+  return Boolean(lead.is_product_page);
 }
 
 export function isAutoComparableLead(
@@ -55,6 +55,7 @@ export function isAutoComparableLead(
 ): lead is DiscoveryLead & { url: string; price: number } {
   return Boolean(
     isProductCardLead(lead) &&
+    lead.page_verified &&
     lead.url &&
     lead.price != null &&
     Number.isFinite(Number(lead.price)) &&
@@ -340,7 +341,7 @@ export function ProductDiscoveryCards({
       <div className="mb-4 flex flex-wrap items-start justify-between gap-2">
         <div>
           <h4 className="text-title-md font-title-md text-on-surface">
-            Товары из открытых источников
+            Товары и кандидаты из открытых источников
           </h4>
           <p className="mt-1 text-body-sm text-on-surface-variant">
             Фото, характеристики и ссылка для позиции «{productName}». Цветная метка показывает,
@@ -369,7 +370,7 @@ export function ProductDiscoveryCards({
         </div>
       ) : (
         <p className="rounded-xl bg-surface-container-low px-4 py-3 text-body-sm text-on-surface-variant">
-          Конкретную карточку товара пока не удалось прочитать. Нажмите «Повторить поиск» у позиции
+          Конкретную товарную ссылку пока не удалось найти. Нажмите «Повторить поиск» у позиции
           или откройте поиск у продавца ниже.
         </p>
       )}

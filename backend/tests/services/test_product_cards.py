@@ -3,7 +3,8 @@ import json
 import pytest
 
 from app.services.product_matching import _compare_locally, _requirements, _type_check, evaluate_product_leads
-from app.services.product_pages import is_public_url, parse_product_page
+from app.services.market_search import enrich_product_pages
+from app.services.product_pages import is_public_url, looks_like_product_url, parse_product_page
 
 
 def _markup(product: dict, page_title: str) -> str:
@@ -116,6 +117,43 @@ def test_satu_collection_is_not_a_product_even_when_featured_product_matches():
         "https://satu.kz/Tualetnyj-utenok-500-ml.html",
     )
     assert page["is_product_page"] is False
+
+
+def test_satu_numbered_product_path_is_a_product_card():
+    page = parse_product_page(
+        _markup(
+            {
+                "@type": "Product",
+                "name": "Ветрозащита для микрофона поролоновая",
+                "image": "https://images.example.kz/microphone-windscreen.jpg",
+            },
+            "Ветрозащита для микрофона поролоновая",
+        ),
+        "https://satu.kz/p132004766-vetrozaschita-mikrofon.html",
+    )
+    assert page["is_product_page"] is True
+    assert looks_like_product_url("https://satu.kz/p132004766-vetrozaschita-mikrofon.html")
+
+
+@pytest.mark.asyncio
+async def test_unreadable_direct_product_url_remains_an_unverified_candidate(monkeypatch):
+    async def blocked_page(*_args, **_kwargs):
+        return {"is_product_page": False, "page_verified": False}
+
+    monkeypatch.setattr("app.services.market_search.fetch_product_page", blocked_page)
+    rows = await enrich_product_pages([
+        {
+            "title": "Ветрозащита для микрофона",
+            "url": "https://satu.kz/p132004766-vetrozaschita-mikrofon.html",
+            "price": 1234,
+            "image_url": "https://images.example.kz/unverified.jpg",
+        }
+    ])
+
+    assert rows[0]["is_product_page"] is True
+    assert rows[0]["page_verified"] is False
+    assert rows[0]["price"] is None
+    assert rows[0]["image_url"] is None
 
 
 def test_private_and_local_urls_are_not_crawled():
