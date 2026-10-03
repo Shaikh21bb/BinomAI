@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.4.2 — 2026-10-04
+
+### Fixed
+
+- Quick Check now extracts concrete product pages directly from Satu search results when a general search engine returns only categories.
+- Long procurement descriptions now prefer an embedded manufacturer and model, such as `Philips FC9734/01`, as the product-search query.
+- Product cards show the published seller name and phone numbers, and CSV exports include both fields.
+
+### Safety
+
+- Seller contacts are displayed only when they are explicitly published on the product page.
+- Search/category pages still cannot become product cards or contribute unverified prices to comparisons.
+
+### Verification
+
+- 244 backend tests, frontend lint, TypeScript checks, and a live public search for `Philips FC9734/01` pass.
+
 ## 1.4.1 — 2026-09-30
 
 ### Fixed

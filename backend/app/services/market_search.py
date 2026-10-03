@@ -3,6 +3,7 @@ import asyncio
 import structlog
 import httpx
 from typing import List, Dict, Any, Optional
+from urllib.parse import quote, urljoin, urlparse
 
 from app.core.config import settings
 from app.services.product_pages import fetch_product_page, looks_like_product_url
@@ -59,6 +60,7 @@ async def search_products(query: str, region: Optional[str] = None) -> List[Dict
         marketplace_query = re.sub(r"моющее средство для посуды", "средство для мытья посуды", query, flags=re.I)
         short_query = marketplace_query.split(";")[0][:85]
         targeted_batches = await asyncio.gather(
+            _satu_search(short_query, region),
             _duckduckgo(f"{short_query} site:kaspi.kz/shop/p/", None),
             _duckduckgo(f"{short_query} site:satu.kz/p", None),
             return_exceptions=True,
@@ -77,6 +79,47 @@ async def search_products(query: str, region: Optional[str] = None) -> List[Dict
 
     # Search pages remain discoverable links, not concrete product cards.
     return results[:12] if any(row.get("is_product_page") for row in results) else results[:10] + _marketplace_links(query, region)
+
+
+def _satu_product_results(markup: str, region: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Extract only concrete product URLs from Satu's public search results."""
+    results: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for href in re.findall(r'href=["\']([^"\']+)["\']', markup, flags=re.I):
+        url = urljoin("https://satu.kz", href.replace("&amp;", "&"))
+        parsed = urlparse(url)
+        if parsed.hostname not in {"satu.kz", "www.satu.kz"} or not looks_like_product_url(url):
+            continue
+        canonical = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        slug = re.sub(r"^p\d+-|\.html$", "", parsed.path.rsplit("/", 1)[-1], flags=re.I)
+        title = " ".join(part for part in slug.replace("-", " ").split() if part).strip()
+        results.append({
+            "title": title.capitalize() if title else "Товар на Satu.kz",
+            "snippet": "Конкретная товарная страница из результатов Satu.kz",
+            "price": None,
+            "currency": None,
+            "shop": "Satu.kz",
+            "city": region,
+            "url": canonical,
+            "image_url": None,
+        })
+        if len(results) >= 12:
+            break
+    return results
+
+
+async def _satu_search(query: str, region: Optional[str]) -> List[Dict[str, Any]]:
+    """Use Satu's public search page when general search engines return no products."""
+    search_query = f"{query} {region}" if region else query
+    url = f"https://satu.kz/search?search_term={quote(search_query)}"
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; BinomProductResearch/1.0)"}
+    async with httpx.AsyncClient(timeout=15.0, headers=headers, follow_redirects=True) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        return _satu_product_results(response.text[:1_200_000], region)
 
 
 def _unique_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -185,6 +228,7 @@ async def enrich_product_pages(results: List[Dict[str, Any]], limit: int = 8) ->
                 result.update(page)
                 if page.get("is_product_page") and page.get("page_verified"):
                     result["title"] = page.get("title") or result.get("title")
+                    result["shop"] = page.get("seller_name") or result.get("shop")
                     result["image_url"] = page.get("image_url")
                     result["price"] = page.get("price")
                     result["currency"] = page.get("currency")
@@ -203,7 +247,6 @@ async def enrich_product_pages(results: List[Dict[str, Any]], limit: int = 8) ->
 
 
 def _marketplace_links(query: str, region: Optional[str]) -> List[Dict[str, Any]]:
-    from urllib.parse import quote
     results = []
     for mp in MARKETPLACES:
         url = mp["url"].format(q=quote(query))

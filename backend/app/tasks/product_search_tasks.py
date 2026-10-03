@@ -19,11 +19,22 @@ from app.services.sourcing import normalize_name, normalize_unit
 
 logger = structlog.get_logger(__name__)
 
+_BRAND_MODEL = re.compile(
+    r"\b([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё-]{2,})\s+"
+    r"([A-Z]{1,10}[A-Z0-9-]*\d[A-Z0-9-]*(?:[/.-][A-Z0-9-]+)*)\b",
+)
+
 
 def _build_search_query(product_name: str, specs: Optional[str]) -> str:
     """Search for a product, not for an entire tender paragraph."""
     name = " ".join((product_name or "").split())
     details = " ".join((specs or "").split())
+    # Procurement PDFs sometimes put a generic/translated label in the name
+    # and the actual manufacturer + model deep inside the description. A model
+    # identifier is a much stronger public-product query than the tender prose.
+    identity = _BRAND_MODEL.search(f"{name} {details}")
+    if identity:
+        return f"{identity.group(1)} {identity.group(2)}"[:120]
     if not details:
         return name[:120]
     details = re.split(r";\s*(?:Место поставки|Срок поставки)\s*:", details, maxsplit=1, flags=re.I)[0]

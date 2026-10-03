@@ -100,6 +100,14 @@ def test_search_query_uses_package_size_instead_of_long_tender_prose():
     assert query == "Моющее средство для туалета 500 мл"
 
 
+def test_search_query_prefers_brand_and_model_hidden_in_tender_prose():
+    query = _build_search_query(
+        "Шаңсорғыш жууға арналған Лоттың қысқаша сипаттауы:",
+        "Характеристики пылесоса Philips FC9734/01. Мощность 2100 Вт.",
+    )
+    assert query == "Philips FC9734/01"
+
+
 def test_extract_price_tenge():
     assert _extract_price("Цена: 25 000 тенге") == 25000.0
     assert _extract_price("25 000 ₸") == 25000.0

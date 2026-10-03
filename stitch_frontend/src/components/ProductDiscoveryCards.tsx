@@ -23,6 +23,9 @@ export interface DiscoveryLead {
   availability?: string | null;
   stock_quantity?: number | null;
   stock_unit?: string | null;
+  seller_name?: string | null;
+  seller_phone?: string | null;
+  seller_phones?: string[];
   characteristics?: Record<string, string>;
   is_product_page?: boolean;
   page_verified?: boolean;
@@ -202,6 +205,10 @@ function ProductCard({
   const canAdd = Boolean(
     onAddOffer && lead.url && lead.price != null && Number.isFinite(Number(lead.price))
   );
+  const seller = lead.seller_name || lead.shop || 'Продавец не указан';
+  const sellerPhones = Array.from(
+    new Set([...(lead.seller_phones ?? []), lead.seller_phone].filter(Boolean) as string[])
+  );
 
   return (
     <article className="flex h-full flex-col gap-3 rounded-2xl border border-outline-variant bg-surface-container-lowest p-4 shadow-sm transition-shadow hover:shadow-md">
@@ -220,6 +227,33 @@ function ProductCard({
         {price && <span className="font-semibold text-on-surface">{price}</span>}
       </div>
       <h4 className="line-clamp-2 min-h-12 text-title-md font-title-md text-on-surface">{name}</h4>
+      <div className="rounded-xl bg-surface-container-low px-3 py-2.5 text-label-sm text-on-surface-variant">
+        <p className="flex items-start gap-1.5">
+          <span className="material-symbols-outlined mt-0.5 text-[16px]">storefront</span>
+          <span><span className="font-medium text-on-surface">Продавец:</span> {seller}</span>
+        </p>
+        {sellerPhones.length ? (
+          <div className="mt-1.5 flex items-start gap-1.5">
+            <span className="material-symbols-outlined mt-0.5 text-[16px]">call</span>
+            <span>
+              <span className="font-medium text-on-surface">Телефон продавца:</span>{' '}
+              {sellerPhones.map((phone, index) => (
+                <span key={phone}>
+                  {index > 0 && ' · '}
+                  <a className="text-primary hover:underline" href={`tel:${phone.replace(/[^+\d]/g, '')}`}>
+                    {phone}
+                  </a>
+                </span>
+              ))}
+            </span>
+          </div>
+        ) : (
+          <p className="mt-1.5 flex items-center gap-1.5">
+            <span className="material-symbols-outlined text-[16px]">phone_disabled</span>
+            Телефон продавца не опубликован
+          </p>
+        )}
+      </div>
       {lead.description && (
         <p className="line-clamp-3 text-body-sm text-on-surface-variant">{lead.description}</p>
       )}

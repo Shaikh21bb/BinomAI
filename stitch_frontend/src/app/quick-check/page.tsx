@@ -67,20 +67,21 @@ function csvCell(value: unknown) {
 function downloadReport(report: ParsedPdf, items: CheckItem[]) {
   const rows: unknown[][] = [[
     'Проверка', 'Дата проверки', 'Позиция', 'Товар по ТЗ', 'Требуемое количество', 'Единица',
-    'Найденный товар', 'Магазин', 'Статус соответствия', 'Характеристика', 'Статус характеристики',
+    'Найденный товар', 'Продавец', 'Телефон продавца', 'Статус соответствия', 'Характеристика', 'Статус характеристики',
     'Доказательство со страницы', 'Источник', 'Опубликованный остаток', 'Единица остатка',
   ]];
   items.forEach((item, index) => {
     const leads = item.results.filter(isVerifiedProductLead).slice(0, 8);
     if (!leads.length) {
       rows.push([report.filename, item.checked_at, index + 1, item.product_name, item.quantity, item.unit,
-        '', '', 'Товар не подтверждён', '', '', '', '', '', '']);
+        '', '', '', 'Товар не подтверждён', '', '', '', '', '', '']);
     }
     leads.forEach((lead) => {
       const checks = lead.checks?.length ? lead.checks : [null];
       checks.forEach((check) => rows.push([
         report.filename, item.checked_at, index + 1, item.product_name, item.quantity, item.unit,
-        lead.title, lead.shop, lead.match_status, check?.requirement, check?.status,
+        lead.title, lead.seller_name || lead.shop, lead.seller_phones?.join(' / ') || lead.seller_phone,
+        lead.match_status, check?.requirement, check?.status,
         check?.evidence, lead.url, lead.stock_quantity, lead.stock_unit,
       ]));
     });

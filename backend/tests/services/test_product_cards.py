@@ -3,7 +3,7 @@ import json
 import pytest
 
 from app.services.product_matching import _compare_locally, _requirements, _type_check, evaluate_product_leads
-from app.services.market_search import enrich_product_pages
+from app.services.market_search import _satu_product_results, enrich_product_pages
 from app.services.product_pages import is_public_url, looks_like_product_url, parse_product_page
 
 
@@ -133,6 +133,36 @@ def test_satu_numbered_product_path_is_a_product_card():
     )
     assert page["is_product_page"] is True
     assert looks_like_product_url("https://satu.kz/p132004766-vetrozaschita-mikrofon.html")
+
+
+def test_satu_search_extracts_unique_concrete_product_pages():
+    rows = _satu_product_results(
+        '<a href="/p123505677-pylesos-philips-fc973401.html">Товар</a>'
+        '<a href="https://satu.kz/p123505677-pylesos-philips-fc973401.html?x=1">Дубликат</a>'
+        '<a href="/search?search_term=philips">Поиск</a>'
+    )
+    assert [row["url"] for row in rows] == [
+        "https://satu.kz/p123505677-pylesos-philips-fc973401.html"
+    ]
+
+
+def test_product_page_extracts_published_seller_and_phone():
+    markup = _markup(
+        {
+            "@type": "Product",
+            "name": "Пылесос Philips FC9734/01",
+            "offers": {
+                "price": "178490",
+                "priceCurrency": "KZT",
+                "seller": {"@type": "Organization", "name": "ТОО Elektrica Trade"},
+            },
+        },
+        "Пылесос Philips FC9734/01",
+    ).replace("</body>", 'PhoneDescription:+7 (700) 507-40-50</body>')
+    page = parse_product_page(markup, "https://satu.kz/p123505677-pylesos-philips-fc973401.html")
+    assert page["seller_name"] == "ТОО Elektrica Trade"
+    assert page["seller_phone"] == "+7 (700) 507-40-50"
+    assert page["seller_phones"] == ["+7 (700) 507-40-50"]
 
 
 @pytest.mark.asyncio

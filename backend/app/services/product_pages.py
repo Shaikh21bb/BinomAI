@@ -21,6 +21,8 @@ _PRODUCT_PATH = re.compile(
 )
 _GENERIC_TITLE_WORDS = {"средс", "моющ", "товар", "купит", "ценам", "посуд", "коста"}
 _STOCK_TEXT = re.compile(r"(?:в наличии|на складе|остаток)\s*:?\s*(\d{1,6})\s*(шт\.?|штук|ед\.?|единиц|упак\.?|упаковок)\b", re.I)
+_SATU_PHONE = re.compile(r"PhoneDescription:(\+7\s*\(\d{3}\)\s*\d{3}[-\s]\d{2}[-\s]\d{2})", re.I)
+_TEL_LINK = re.compile(r'href=["\']tel:([^"\']+)["\']', re.I)
 
 
 def is_public_url(url: str) -> bool:
@@ -110,6 +112,27 @@ def _stock_quantity(offer: dict[str, Any], description: str, properties: dict[st
     if match:
         return int(match.group(1)), match.group(2)
     return None, None
+
+
+def _seller_details(offer: dict[str, Any], markup: str) -> tuple[str | None, list[str]]:
+    """Return only seller details explicitly published on the product page."""
+    seller = offer.get("seller") or {}
+    if not isinstance(seller, dict):
+        seller = {}
+    name = _clean(seller.get("name"), 200) or None
+    candidates = [seller.get("telephone"), *_TEL_LINK.findall(markup), *_SATU_PHONE.findall(markup)]
+    phones: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        phone = _clean(candidate, 40)
+        digits = re.sub(r"\D", "", phone)
+        if len(digits) not in {10, 11, 12} or digits in seen:
+            continue
+        seen.add(digits)
+        phones.append(phone)
+        if len(phones) >= 3:
+            break
+    return name, phones
 
 
 def _product_objects(value: Any):
@@ -270,6 +293,7 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
         or _best_page_image(parser.images, page_url, name or page_title)
     )
     stock_quantity, stock_unit = _stock_quantity(offer, description, properties)
+    seller_name, seller_phones = _seller_details(offer, markup)
     evidence = "\n".join(filter(None, [name, description, *[f"{k}: {v}" for k, v in properties.items()]]))[:6500]
     return {
         "is_product_page": True,
@@ -283,6 +307,9 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
         "availability": str(offer.get("availability") or "").rsplit("/", 1)[-1] or None,
         "stock_quantity": stock_quantity,
         "stock_unit": stock_unit,
+        "seller_name": seller_name,
+        "seller_phone": seller_phones[0] if seller_phones else None,
+        "seller_phones": seller_phones,
         "evidence_text": evidence,
     }
 
