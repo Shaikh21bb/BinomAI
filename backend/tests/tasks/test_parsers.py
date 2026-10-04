@@ -1,4 +1,8 @@
+import io
+import zipfile
+
 import pytest
+from docx import Document
 from unittest.mock import AsyncMock, patch, MagicMock
 
 from app.core.parsers import DocumentParser
@@ -47,6 +51,30 @@ def test_chunk_text():
     assert len(chunks) > 1
     assert chunks[0]["char_length"] == 1000
     assert chunks[1]["char_length"] > 0
+
+
+def test_extract_from_docx_includes_paragraphs_and_tables():
+    stream = io.BytesIO()
+    document = Document()
+    document.add_paragraph("Техническая спецификация")
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Ноутбук"
+    table.cell(0, 1).text = "5 шт"
+    document.save(stream)
+
+    extracted = DocumentParser.extract_from_docx(stream.getvalue())
+
+    assert "Техническая спецификация" in extracted
+    assert "Ноутбук | 5 шт" in extracted
+
+
+def test_extract_from_docx_rejects_incomplete_zip_package():
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as archive:
+        archive.writestr("word/document.xml", "<document />")
+
+    with pytest.raises(ValueError, match="missing required parts"):
+        DocumentParser.extract_from_docx(stream.getvalue())
 
 # --- Task Tests ---
 @pytest.fixture

@@ -102,6 +102,10 @@ function requiredAmount(item: PdfItem) {
   return `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 4 }).format(item.quantity)} ${displayUnit(item.unit)}`;
 }
 
+function isWordDocument(filename: string) {
+  return filename.toLowerCase().endsWith('.docx');
+}
+
 export default function QuickCheckPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -315,12 +319,17 @@ export default function QuickCheckPage() {
   async function start(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!file || busy) return;
-    if (!file.name.toLowerCase().endsWith('.pdf')) {
-      setError('Выберите PDF-файл технической спецификации.');
+    const lowerName = file.name.toLowerCase();
+    if (lowerName.endsWith('.doc')) {
+      setError('Старый формат .doc не поддерживается. Сохраните документ как .docx и загрузите снова.');
+      return;
+    }
+    if (!lowerName.endsWith('.pdf') && !lowerName.endsWith('.docx')) {
+      setError('Выберите техническую спецификацию в формате PDF или DOCX.');
       return;
     }
     if (file.size > 20 * 1024 * 1024) {
-      setError('Максимальный размер PDF — 20 МБ.');
+      setError('Максимальный размер документа — 20 МБ.');
       return;
     }
 
@@ -337,10 +346,10 @@ export default function QuickCheckPage() {
       setReusedReport(Boolean(document.reused));
       setItems(document.items.map((item) => ({ ...item, results: item.results ?? [] })));
       setPhase(['queued', 'running'].includes(document.processing_state) ? 'searching' : 'done');
-      if (document.processing_state === 'error') setError('PDF сохранён, но фоновый поиск пока недоступен. Запустите его из сохранённой проверки.');
+      if (document.processing_state === 'error') setError('Результат сохранён, но фоновый поиск пока недоступен. Запустите его из сохранённой проверки.');
       await refreshHistory();
     } catch (uploadError) {
-      setError(errorMessage(uploadError, 'Не удалось прочитать PDF'));
+      setError(errorMessage(uploadError, 'Не удалось прочитать документ'));
       setPhase('idle');
     }
   }
@@ -364,7 +373,7 @@ export default function QuickCheckPage() {
               <span className="material-symbols-outlined text-[16px]">arrow_back</span>Рабочий стол
             </Link>
             <h1 className="text-display font-display tracking-tight text-on-surface">Быстрая проверка товаров</h1>
-            <p className="mt-2 max-w-2xl text-body-lg text-on-surface-variant">Загрузите техспецификацию в PDF. Мы выделим товары, найдём их фото и проверим опубликованные характеристики — без создания тендера. Повторная загрузка того же файла откроет сохранённый результат сразу.</p>
+            <p className="mt-2 max-w-2xl text-body-lg text-on-surface-variant">Загрузите техспецификацию в PDF или Word (.docx). Мы выделим товары, найдём их фото и проверим опубликованные характеристики — без создания тендера. Повторная загрузка того же файла откроет сохранённый результат сразу.</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1.5 text-label-sm text-primary"><span className="material-symbols-outlined text-[17px]">bolt</span>Отдельная проверка</span>
@@ -379,19 +388,19 @@ export default function QuickCheckPage() {
             onDrop={onDrop}
             className={`flex flex-col items-center gap-3 rounded-xl border-2 border-dashed px-4 py-8 text-center transition-colors ${dragging ? 'border-primary bg-primary/5' : 'border-outline-variant bg-surface-container-low'}`}
           >
-            <span className="material-symbols-outlined rounded-full bg-primary/10 p-3 text-[32px] text-primary">picture_as_pdf</span>
+            <span className="material-symbols-outlined rounded-full bg-primary/10 p-3 text-[32px] text-primary">description</span>
             <div>
-              <p className="text-title-md font-title-md text-on-surface">{file ? file.name : 'Перетащите PDF сюда'}</p>
-              <p className="mt-1 text-body-sm text-on-surface-variant">Текстовый PDF или скан до 20 МБ · для скана до 12 страниц · исходный файл не хранится, сохраняется только результат проверки</p>
+              <p className="text-title-md font-title-md text-on-surface">{file ? file.name : 'Перетащите PDF или DOCX сюда'}</p>
+              <p className="mt-1 text-body-sm text-on-surface-variant">PDF, скан или Word (.docx) до 20 МБ · для скана до 12 страниц · исходный файл не хранится, сохраняется только результат проверки</p>
             </div>
-            <input ref={inputRef} type="file" accept=".pdf,application/pdf" className="hidden" disabled={busy} onChange={(event) => chooseFile(event.target.files?.[0] || null)} />
-            <button type="button" disabled={busy} onClick={() => inputRef.current?.click()} className="rounded-lg border border-outline-variant bg-surface-container-lowest px-4 py-2 text-label-md text-on-surface hover:border-primary disabled:opacity-50">Выбрать PDF</button>
+            <input ref={inputRef} type="file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" className="hidden" disabled={busy} onChange={(event) => chooseFile(event.target.files?.[0] || null)} />
+            <button type="button" disabled={busy} onClick={() => inputRef.current?.click()} className="rounded-lg border border-outline-variant bg-surface-container-lowest px-4 py-2 text-label-md text-on-surface hover:border-primary disabled:opacity-50">Выбрать файл</button>
           </div>
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
             <p className="max-w-xl text-body-sm text-on-surface-variant">Точное наличие в штуках покажем, если продавец его указал. Статус «в наличии» без числа не считаем подтверждённым остатком.</p>
             <button type="submit" disabled={!file || busy} className="inline-flex items-center gap-2 rounded-lg bg-on-background px-5 py-2.5 text-label-md font-label-md text-on-primary shadow-sm hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50">
               <span className={`material-symbols-outlined text-[19px] ${busy ? 'animate-spin' : ''}`}>{busy ? 'sync' : 'travel_explore'}</span>
-              {phase === 'parsing' ? 'Читаем PDF…' : 'Проверить PDF'}
+              {phase === 'parsing' ? 'Читаем документ…' : 'Проверить документ'}
             </button>
           </div>
           {error && <p role="alert" className="mt-4 rounded-lg bg-error-container px-4 py-3 text-body-sm text-on-error-container">{error}</p>}
@@ -401,7 +410,7 @@ export default function QuickCheckPage() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-title-lg font-title-lg text-on-surface">История всех проверок</h2>
-              <p className="mt-1 text-body-sm text-on-surface-variant">Результаты хранятся в базе и доступны только вам. Исходные PDF не сохраняются.</p>
+              <p className="mt-1 text-body-sm text-on-surface-variant">Результаты хранятся в базе и доступны только вам. Исходные файлы не сохраняются.</p>
             </div>
             <button type="button" disabled={loadingHistory} onClick={() => void refreshHistory()} className="inline-flex items-center gap-1 text-label-sm text-primary hover:underline disabled:opacity-50"><span className="material-symbols-outlined text-[17px]">refresh</span>Обновить</button>
           </div>
@@ -434,7 +443,7 @@ export default function QuickCheckPage() {
                 </div>
               ))}
             </div>
-          ) : !historyError && !loadingHistory && <p className="mt-4 text-body-sm text-on-surface-variant">Пока нет сохранённых проверок. Проверки, сделанные до появления истории, не сохранялись; новые появятся здесь сразу после загрузки PDF.</p>}
+          ) : !historyError && !loadingHistory && <p className="mt-4 text-body-sm text-on-surface-variant">Пока нет сохранённых проверок. Проверки, сделанные до появления истории, не сохранялись; новые появятся здесь сразу после загрузки документа.</p>}
           {nextHistoryCursor && <button type="button" disabled={loadingHistory} onClick={() => void loadMoreHistory()} className="mt-4 w-full rounded-lg border border-outline-variant px-4 py-2 text-label-md text-on-surface hover:border-primary disabled:opacity-50">{loadingHistory ? 'Загружаем…' : 'Показать предыдущие проверки'}</button>}
         </section>
 
@@ -442,8 +451,8 @@ export default function QuickCheckPage() {
           <section className="space-y-4">
             <div className="flex flex-wrap items-end justify-between gap-2">
               <div>
-                <h2 className="text-headline-lg font-headline-lg text-on-surface">Результаты по PDF</h2>
-                <p className="mt-1 text-body-sm text-on-surface-variant">{parsed.filename} · {parsed.page_count} стр. · {parsed.total_items} позиций</p>
+                <h2 className="text-headline-lg font-headline-lg text-on-surface">Результаты проверки</h2>
+                <p className="mt-1 text-body-sm text-on-surface-variant">{parsed.filename} · {isWordDocument(parsed.filename) ? 'DOCX' : `${parsed.page_count} стр.`} · {parsed.total_items} позиций</p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <span aria-live="polite" className="rounded-full bg-primary/10 px-3 py-1.5 text-label-sm text-primary">Проверено {completed} из {items.length}</span>
@@ -452,11 +461,11 @@ export default function QuickCheckPage() {
                 <button type="button" onClick={() => downloadReport(parsed, items)} className="inline-flex items-center gap-1.5 rounded-lg border border-outline-variant px-3 py-1.5 text-label-sm text-on-surface hover:border-primary"><span className="material-symbols-outlined text-[17px]">download</span>Скачать отчёт CSV</button>
               </div>
             </div>
-            {reusedReport && <p role="status" className="rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-body-sm text-on-surface">Этот PDF уже есть в истории: открыта проверка от {formatDate(parsed.created_at)} без повторной обработки файла. {activeSearch ? 'Поиск ещё идёт в фоне.' : 'Для свежих данных нажмите «Проверить заново» — предыдущий результат останется в истории.'}</p>}
+            {reusedReport && <p role="status" className="rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-body-sm text-on-surface">Этот документ уже есть в истории: открыта проверка от {formatDate(parsed.created_at)} без повторной обработки файла. {activeSearch ? 'Поиск ещё идёт в фоне.' : 'Для свежих данных нажмите «Проверить заново» — предыдущий результат останется в истории.'}</p>}
             {activeSearch && !staleSearch && <p role="status" className="rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-body-sm text-on-surface">Поиск идёт в фоне. Можно закрыть страницу: готовые товары сохраняются, а прогресс виден здесь и в истории.</p>}
             {staleSearch && <p role="status" className="rounded-xl bg-amber-50 px-4 py-3 text-body-sm text-amber-900">Прогресс давно не обновлялся. Нажмите «Возобновить проверку», чтобы продолжить с сохранённого места.</p>}
             {parsed.processing_state === 'error' && <p role="alert" className="rounded-xl bg-error-container px-4 py-3 text-body-sm text-on-error-container">Поиск прервался. Уже найденные товары сохранены; нажмите «Проверить оставшиеся», чтобы продолжить.</p>}
-            {parsed.truncated && <p className="rounded-lg bg-amber-50 p-3 text-body-sm text-amber-900">Для быстрой проверки взяты первые 20 позиций PDF.</p>}
+            {parsed.truncated && <p className="rounded-lg bg-amber-50 p-3 text-body-sm text-amber-900">Для быстрой проверки взяты первые 20 позиций документа.</p>}
             {parsed.ocr_pages > 0 && <p className="rounded-lg bg-amber-50 p-3 text-body-sm text-amber-900">Распознано страниц скана: {parsed.ocr_pages}. Проверьте названия, количество и характеристики: распознавание может допускать ошибки.</p>}
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               {[

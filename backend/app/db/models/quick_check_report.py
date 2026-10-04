@@ -1,4 +1,4 @@
-"""Saved results of a quick PDF check; the source PDF is not retained."""
+"""Saved results of a quick document check; the source file is not retained."""
 
 import uuid
 

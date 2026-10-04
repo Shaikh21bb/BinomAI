@@ -1,11 +1,13 @@
-"""The quick PDF flow must work without creating a project or tender."""
+"""The quick document flow must work without creating a project or tender."""
 
+import io
 import hashlib
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from docx import Document
 from httpx import ASGITransport, AsyncClient
 
 from app.api.deps import get_current_user, get_db, get_redis
@@ -14,6 +16,19 @@ from app.db.models.quick_check_report import QuickCheckReport
 from app.db.models.user import User
 from app.main import app
 from tests.conftest import scalar_first
+
+
+def _docx_bytes() -> bytes:
+    stream = io.BytesIO()
+    document = Document()
+    document.add_paragraph("Техническая спецификация")
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Товар"
+    table.cell(0, 1).text = "Количество"
+    table.cell(1, 0).text = "Средство для посуды 500 мл"
+    table.cell(1, 1).text = "12 шт"
+    document.save(stream)
+    return stream.getvalue()
 
 
 @pytest.fixture
@@ -58,6 +73,64 @@ async def test_quick_parse_extracts_items_without_tender(authenticated_user, mon
     assert saved.pdf_sha256 == hashlib.sha256(b"%PDF-test").hexdigest()
     assert not hasattr(saved, "pdf_bytes")
     authenticated_user[1].commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_quick_parse_extracts_items_from_real_docx(authenticated_user, monkeypatch):
+    contents = _docx_bytes()
+    extracted = []
+
+    def extract_products(text):
+        extracted.append(text)
+        return [{"product_name": "Средство для посуды 500 мл", "quantity": 12, "unit": "шт"}]
+
+    monkeypatch.setattr(quick_check, "extract_products_from_text", extract_products)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/quick-check/parse",
+            files={"file": (
+                "techspec.docx",
+                contents,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["filename"] == "techspec.docx"
+    assert response.json()["page_count"] == 1
+    assert response.json()["ocr_pages"] == 0
+    assert "Средство для посуды 500 мл" in extracted[0]
+    assert "12 шт" in extracted[0]
+    saved = authenticated_user[1].add.call_args.args[0]
+    assert saved.pdf_sha256 == hashlib.sha256(contents).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_quick_parse_rejects_legacy_doc_with_conversion_hint(authenticated_user):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/quick-check/parse",
+            files={"file": ("techspec.doc", b"legacy-word", "application/msword")},
+        )
+
+    assert response.status_code == 415
+    assert ".docx" in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_quick_parse_rejects_invalid_docx(authenticated_user):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/quick-check/parse",
+            files={"file": (
+                "fake.docx",
+                b"PK-not-a-real-word-document",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )},
+        )
+
+    assert response.status_code == 422
+    assert "DOCX" in response.json()["error"]["message"]
 
 
 @pytest.mark.asyncio

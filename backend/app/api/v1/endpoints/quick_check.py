@@ -1,4 +1,4 @@
-"""Saved quick PDF checks; no project, tender, or source file is created."""
+"""Saved quick document checks; no project, tender, or source file is created."""
 
 import base64
 import binascii
@@ -34,7 +34,7 @@ from app.tasks.product_search_tasks import _build_search_query
 from app.tasks.quick_check_tasks import search_quick_report_task
 
 router = APIRouter()
-_MAX_PDF_BYTES = 20 * 1024 * 1024
+_MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
 _MAX_PAGES = 60
 _MAX_ITEMS = 20
 _HISTORY_PAGE_SIZE = 20
@@ -186,7 +186,7 @@ async def run_quick_report(
     cache: redis.Redis = Depends(get_redis),
     db: AsyncSession = Depends(get_db),
 ):
-    """Resume an interrupted report without re-uploading the PDF."""
+    """Resume an interrupted report without re-uploading the source document."""
     await enforce_rate_limit(
         cache, scope="quick-check-run", subject=str(user.id), rate=settings.RATE_LIMIT_AI_OPS,
     )
@@ -211,7 +211,7 @@ async def rerun_quick_report(
     cache: redis.Redis = Depends(get_redis),
     db: AsyncSession = Depends(get_db),
 ):
-    """Start a fresh search from saved PDF positions, preserving the old result."""
+    """Start a fresh search from saved document positions, preserving the old result."""
     await enforce_rate_limit(
         cache, scope="quick-check-rerun", subject=str(user.id), rate=settings.RATE_LIMIT_AI_OPS,
     )
@@ -251,28 +251,47 @@ async def delete_quick_report(
 
 
 @router.post("/parse")
-async def parse_quick_pdf(
+async def parse_quick_document(
     file: UploadFile = File(...),
     user: User = Depends(get_current_user),
     cache: redis.Redis = Depends(get_redis),
     db: AsyncSession = Depends(get_db),
 ):
-    """Extract positions and save the result, without storing the source PDF."""
+    """Extract positions and save the result, without storing the source document."""
     await enforce_rate_limit(
         cache,
         scope="quick-check-upload",
         subject=str(user.id),
         rate=settings.RATE_LIMIT_UPLOADS,
     )
-    if not (file.filename or "").lower().endswith(".pdf") or file.content_type not in {
-        "application/pdf", "application/octet-stream",
-    }:
-        raise HTTPException(status_code=415, detail="Загрузите PDF-файл технической спецификации.")
-    contents = await file.read(_MAX_PDF_BYTES + 1)
-    if len(contents) > _MAX_PDF_BYTES:
-        raise HTTPException(status_code=413, detail="PDF для быстрой проверки не должен превышать 20 МБ.")
-    if not contents.startswith(b"%PDF-"):
+    filename = file.filename or ""
+    extension = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    if extension == "doc":
+        raise HTTPException(
+            status_code=415,
+            detail="Старый формат .doc не поддерживается. Сохраните документ как .docx и загрузите снова.",
+        )
+    if extension not in {"pdf", "docx"}:
+        raise HTTPException(status_code=415, detail="Загрузите техническую спецификацию в формате PDF или DOCX.")
+
+    allowed_content_types = {
+        "pdf": {"application/pdf", "application/octet-stream"},
+        "docx": {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/octet-stream",
+            "application/zip",
+        },
+    }
+    if file.content_type not in allowed_content_types[extension]:
+        raise HTTPException(status_code=415, detail="Тип файла не соответствует его расширению.")
+
+    contents = await file.read(_MAX_DOCUMENT_BYTES + 1)
+    if len(contents) > _MAX_DOCUMENT_BYTES:
+        raise HTTPException(status_code=413, detail="Документ для быстрой проверки не должен превышать 20 МБ.")
+    if extension == "pdf" and not contents.startswith(b"%PDF-"):
         raise HTTPException(status_code=415, detail="Файл не является корректным PDF.")
+    if extension == "docx" and not contents.startswith(b"PK"):
+        raise HTTPException(status_code=415, detail="Файл не является корректным DOCX.")
 
     pdf_sha256 = hashlib.sha256(contents).hexdigest()
     existing = (await db.execute(
@@ -288,32 +307,42 @@ async def parse_quick_pdf(
     if existing is not None:
         return {**_report_payload(existing), "reused": True}
 
-    pages = await run_in_threadpool(DocumentParser.get_page_count, contents, "application/pdf")
-    if pages is None:
-        raise HTTPException(status_code=422, detail="Не удалось прочитать PDF.")
-    if pages > _MAX_PAGES:
-        raise HTTPException(status_code=413, detail="Для быстрой проверки загрузите PDF не более 60 страниц.")
-    try:
-        raw_text, ocr_pages = await run_in_threadpool(extract_pdf_text_with_ocr, contents)
-    except PdfOcrLimitError:
-        raise HTTPException(status_code=413, detail=f"Для быстрой проверки скана загрузите не более {MAX_OCR_PAGES} отсканированных страниц.")
-    except PdfOcrUnavailableError:
-        raise HTTPException(status_code=503, detail="Распознавание сканов пока недоступно на сервере. Повторите позже или загрузите PDF с текстовым слоем.")
-    except PdfOcrProcessingError:
-        raise HTTPException(status_code=422, detail="Не удалось распознать страницы PDF. Проверьте качество скана или попробуйте PDF с текстовым слоем.")
-    except ValueError:
-        raise HTTPException(status_code=422, detail="Не удалось извлечь текст из PDF.")
+    if extension == "pdf":
+        pages = await run_in_threadpool(DocumentParser.get_page_count, contents, "application/pdf")
+        if pages is None:
+            raise HTTPException(status_code=422, detail="Не удалось прочитать PDF.")
+        if pages > _MAX_PAGES:
+            raise HTTPException(status_code=413, detail="Для быстрой проверки загрузите PDF не более 60 страниц.")
+        try:
+            raw_text, ocr_pages = await run_in_threadpool(extract_pdf_text_with_ocr, contents)
+        except PdfOcrLimitError:
+            raise HTTPException(status_code=413, detail=f"Для быстрой проверки скана загрузите не более {MAX_OCR_PAGES} отсканированных страниц.")
+        except PdfOcrUnavailableError:
+            raise HTTPException(status_code=503, detail="Распознавание сканов пока недоступно на сервере. Повторите позже или загрузите PDF с текстовым слоем.")
+        except PdfOcrProcessingError:
+            raise HTTPException(status_code=422, detail="Не удалось распознать страницы PDF. Проверьте качество скана или попробуйте PDF с текстовым слоем.")
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Не удалось извлечь текст из PDF.")
+    else:
+        # DOCX has no reliable page count without rendering; one logical document
+        # keeps backwards-compatible report storage while the UI omits page count.
+        pages = 1
+        ocr_pages = 0
+        try:
+            raw_text = await run_in_threadpool(DocumentParser.extract_from_docx, contents)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Не удалось прочитать DOCX. Проверьте, что файл не повреждён и не защищён паролем.")
     cleaned = DocumentParser.clean_text(raw_text)
     if not cleaned:
-        raise HTTPException(status_code=422, detail="Текст не найден даже после распознавания. Проверьте качество скана.")
+        raise HTTPException(status_code=422, detail="В документе не найден текст. Проверьте содержимое файла.")
     products = extract_products_from_text(cleaned)
     if not products:
-        raise HTTPException(status_code=422, detail="В PDF не найдены позиции товаров. Проверьте, что это техническая спецификация.")
+        raise HTTPException(status_code=422, detail="В документе не найдены позиции товаров. Проверьте, что это техническая спецификация.")
     report = QuickCheckReport(
         id=uuid.uuid4(),
         company_id=user.company_id,
         created_by=user.id,
-        filename=(file.filename or "specification.pdf")[:500],
+        filename=(file.filename or f"specification.{extension}")[:500],
         page_count=pages,
         ocr_pages=ocr_pages,
         total_items=len(products),

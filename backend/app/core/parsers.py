@@ -1,9 +1,14 @@
 from pypdf import PdfReader
 from docx import Document
 import re
+import zipfile
 from datetime import date
 from typing import List, Dict, Any, Optional
 import io
+
+
+_MAX_DOCX_ENTRIES = 2_000
+_MAX_DOCX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
 
 class DocumentParser:
     """
@@ -40,6 +45,18 @@ class DocumentParser:
     def extract_from_docx(file_bytes: bytes) -> str:
         """Extracts text from DOCX bytes, including table cells."""
         try:
+            with zipfile.ZipFile(io.BytesIO(file_bytes)) as archive:
+                entries = archive.infolist()
+                if len(entries) > _MAX_DOCX_ENTRIES:
+                    raise ValueError("DOCX contains too many files")
+                if any(entry.flag_bits & 0x1 for entry in entries):
+                    raise ValueError("Encrypted DOCX files are not supported")
+                if sum(entry.file_size for entry in entries) > _MAX_DOCX_UNCOMPRESSED_BYTES:
+                    raise ValueError("DOCX expands beyond the safe limit")
+                names = {entry.filename for entry in entries}
+                if "[Content_Types].xml" not in names or "word/document.xml" not in names:
+                    raise ValueError("DOCX package is missing required parts")
+
             doc = Document(io.BytesIO(file_bytes))
             text_parts = [para.text for para in doc.paragraphs if para.text.strip()]
 

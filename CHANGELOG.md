@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.4.3 — 2026-10-05
+
+### Added
+
+- Quick Check accepts modern Word documents (`.docx`) in addition to text PDFs and scans.
+- DOCX extraction includes both normal paragraphs and table cells before product discovery begins.
+
+### Safety
+
+- Word uploads are validated as real DOCX packages and rejected when encrypted, malformed, or excessively expanded.
+- Legacy `.doc` files receive an explicit instruction to be saved as `.docx`; uploaded source files are still not retained.
+
+### Verification
+
+- Real in-memory Word documents, invalid packages, and legacy-format guidance are covered by backend tests.
+- Frontend lint, TypeScript checks, and the production build pass with the combined PDF/DOCX upload flow.
+
 ## 1.4.2 — 2026-10-04
 
 ### Fixed
