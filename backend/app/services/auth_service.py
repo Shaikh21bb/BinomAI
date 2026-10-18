@@ -1,4 +1,5 @@
 import uuid
+import httpx
 from datetime import datetime, timezone
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +15,21 @@ from app.db.models.invite import Invite
 from app.db.repositories.base import BaseRepository
 
 logger = structlog.get_logger(__name__)
+
+
+def _raise_transient_auth_error(response: httpx.Response) -> None:
+    """A temporary provider outage must not be reported as invalid credentials."""
+    if response.status_code == 429:
+        raise HTTPException(
+            status_code=429,
+            detail="Слишком много попыток авторизации. Подождите немного и повторите попытку.",
+            headers={"Retry-After": response.headers.get("retry-after", "60")},
+        )
+    if response.status_code >= 500:
+        raise HTTPException(
+            status_code=503,
+            detail="Сервис авторизации временно недоступен. Попробуйте ещё раз.",
+        )
 
 # Reusing base repo for simple checks
 user_repo = BaseRepository(User)
@@ -38,7 +54,8 @@ class AuthService:
                 "password": credentials.password
             }
             response = await client.post(url, json=payload, headers=headers)
-            
+
+            _raise_transient_auth_error(response)
             if response.status_code != 200:
                 logger.warning("supabase_login_failed", email=credentials.email, status=response.status_code)
                 raise HTTPException(
@@ -94,7 +111,8 @@ class AuthService:
                 "refresh_token": token_data.refresh_token
             }
             response = await client.post(url, json=payload, headers=headers)
-            
+
+            _raise_transient_auth_error(response)
             if response.status_code != 200:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -104,6 +122,7 @@ class AuthService:
             data = response.json()
             return {
                 "access_token": data["access_token"],
+                "refresh_token": data.get("refresh_token"),
                 "expires_in": data["expires_in"]
             }
 

@@ -5,8 +5,8 @@ export default function DashboardPage() {
   return (
     <AppShell>
       <ProjectsDashboard
-        pageLabel="Активные тендеры"
-        pageDescription="Мониторинг текущих процедур и автоматизированный ИИ-анализ."
+        pageLabel="Рабочий стол"
+        pageDescription="Управляйте тендерами, проверяйте товары и держите ближайшие сроки в фокусе."
       />
     </AppShell>
   );

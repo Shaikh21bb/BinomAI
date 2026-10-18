@@ -1,4 +1,17 @@
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+export const AUTH_SESSION_KEY = 'binom_auth_session';
+
+export function saveSessionTokens(accessToken: string, refreshToken: string): void {
+  localStorage.setItem('access_token', accessToken);
+  localStorage.setItem('refresh_token', refreshToken);
+  localStorage.setItem(AUTH_SESSION_KEY, crypto.randomUUID());
+}
+
+export function clearSessionTokens(): void {
+  localStorage.removeItem('access_token');
+  localStorage.removeItem('refresh_token');
+  localStorage.removeItem(AUTH_SESSION_KEY);
+}
 
 class APIError extends Error {
   status: number;
@@ -13,7 +26,7 @@ class APIError extends Error {
 }
 
 interface APIErrorPayload {
-  error?: { message?: string };
+  error?: { message?: string; details?: Array<{ msg?: string }> };
   detail?: string | Array<{ msg?: string }>;
   meta?: { request_id?: string };
 }
@@ -22,17 +35,106 @@ function responseRequestId(response: Response, data: APIErrorPayload | null): st
   return response.headers.get('X-Request-ID') ?? data?.meta?.request_id;
 }
 
-function clearSessionAndRedirect() {
+function sessionId(): string | null {
+  return typeof window !== 'undefined' ? localStorage.getItem(AUTH_SESSION_KEY) : null;
+}
+
+function clearSessionAndRedirect(expectedRefreshToken: string | null, expectedSessionId: string | null) {
   if (typeof window === 'undefined') return;
-  localStorage.removeItem('access_token');
-  localStorage.removeItem('refresh_token');
+  // A request from an older session must not sign out a newly logged-in user.
+  if (localStorage.getItem('refresh_token') !== expectedRefreshToken || sessionId() !== expectedSessionId) return;
+  clearSessionTokens();
   const loginUrl = new URL('/login', window.location.origin);
   if (window.location.href !== loginUrl.href) window.location.assign(loginUrl);
 }
 
-async function fetchWithAuth(url: string, options: RequestInit = {}) {
-  const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
-  
+function storedToken(key: 'access_token' | 'refresh_token'): string | null {
+  return typeof window !== 'undefined' ? localStorage.getItem(key) : null;
+}
+
+function defaultErrorMessage(status: number): string {
+  if (status === 401) return 'Сессия истекла. Войдите снова.';
+  if (status === 403) return 'У вас нет доступа к этому действию.';
+  if (status === 404) return 'Запрошенные данные не найдены.';
+  if (status === 413) return 'Файл слишком большой. Выберите файл меньшего размера.';
+  if (status === 422) return 'Проверьте заполненные поля.';
+  if (status === 429) return 'Слишком много запросов. Подождите немного и повторите попытку.';
+  if (status >= 500) return 'Сервер временно недоступен. Повторите попытку немного позже.';
+  return 'Не удалось выполнить запрос. Повторите попытку.';
+}
+
+async function responseError(response: Response): Promise<APIError> {
+  let data: APIErrorPayload | null = null;
+  try {
+    data = await response.json();
+  } catch {
+    // A proxy may return HTML or an empty body instead of the API error format.
+  }
+  const details = Array.isArray(data?.detail) ? data.detail : data?.error?.details;
+  const validationMessage = details?.map((item) => item.msg).filter(Boolean).slice(0, 3).join('; ');
+  const serverMessage = typeof data?.error?.message === 'string' ? data.error.message : null;
+  const message = serverMessage === 'Request validation failed.'
+    ? `Проверьте заполненные поля.${validationMessage ? ` ${validationMessage}` : ''}`
+    : serverMessage || (typeof data?.detail === 'string' ? data.detail : null) || validationMessage || defaultErrorMessage(response.status);
+  return new APIError(message, response.status, data, responseRequestId(response, data));
+}
+
+let refreshInFlight: { token: string; session: string | null; promise: Promise<string | null> } | null = null;
+
+async function refreshAccessToken(refreshToken: string, session: string | null): Promise<string | null> {
+  if (refreshInFlight?.token === refreshToken && refreshInFlight.session === session) return refreshInFlight.promise;
+
+  const previousAccessToken = storedToken('access_token');
+  const promise = (async () => {
+    const response = await fetch(`${BASE_URL}/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+    if (sessionId() !== session) return null;
+    if (storedToken('refresh_token') !== refreshToken) {
+      const concurrentToken = storedToken('access_token');
+      return concurrentToken !== previousAccessToken ? concurrentToken : null;
+    }
+    if (!response.ok) {
+      // Network failures, rate limits and server errors do not invalidate a session.
+      if (response.status === 401 || response.status === 403) clearSessionAndRedirect(refreshToken, session);
+      throw await responseError(response);
+    }
+    const data: { access_token?: string; refresh_token?: string } = await response.json();
+    if (!data.access_token) {
+      throw new APIError('Не удалось обновить сессию. Повторите попытку.', 502, null);
+    }
+    // Logout or a new login may have happened while the refresh was in flight.
+    if (sessionId() !== session || storedToken('refresh_token') !== refreshToken) return null;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('access_token', data.access_token);
+      if (data.refresh_token) localStorage.setItem('refresh_token', data.refresh_token);
+    }
+    return data.access_token;
+  })();
+  refreshInFlight = { token: refreshToken, session, promise };
+  try {
+    return await promise;
+  } finally {
+    if (refreshInFlight?.promise === promise) refreshInFlight = null;
+  }
+}
+
+const PUBLIC_AUTH_ENDPOINTS = new Set(['/auth/login', '/auth/register', '/auth/forgot-password', '/auth/reset-password']);
+
+async function authenticatedResponse(url: string, options: RequestInit = {}): Promise<{
+  response: Response;
+  ensureCurrentSession: () => void;
+}> {
+  const requiresAuth = !PUBLIC_AUTH_ENDPOINTS.has(url.split('?')[0]);
+  const token = requiresAuth ? storedToken('access_token') : null;
+  const session = sessionId();
+  const ensureCurrentSession = () => {
+    if (token && (sessionId() !== session || !storedToken('access_token'))) {
+      throw new DOMException('Сессия изменилась.', 'AbortError');
+    }
+  };
   const headers = new Headers(options.headers || {});
   if (token) {
     headers.set('Authorization', `Bearer ${token}`);
@@ -47,59 +149,39 @@ async function fetchWithAuth(url: string, options: RequestInit = {}) {
   };
 
   let response = await fetch(`${BASE_URL}${url}`, config);
+  ensureCurrentSession();
 
-  if (response.status === 401 && token) {
-    // Try to refresh token
-    const refreshToken = typeof window !== 'undefined' ? localStorage.getItem('refresh_token') : null;
-    if (refreshToken) {
-      try {
-        const refreshResponse = await fetch(`${BASE_URL}/auth/refresh`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refresh_token: refreshToken }),
-        });
-        
-        if (refreshResponse.ok) {
-          const data = await refreshResponse.json();
-          if (typeof window !== 'undefined') {
-            localStorage.setItem('access_token', data.access_token);
-            if (data.refresh_token) {
-              localStorage.setItem('refresh_token', data.refresh_token);
-            }
-          }
-          
-          // Retry original request
-          headers.set('Authorization', `Bearer ${data.access_token}`);
-          config.headers = headers;
-          response = await fetch(`${BASE_URL}${url}`, config);
-        } else {
-          // Refresh failed
-          clearSessionAndRedirect();
-        }
-      } catch {
-        clearSessionAndRedirect();
+  if (response.status === 401 && token && requiresAuth) {
+    options.signal?.throwIfAborted();
+    const refreshToken = storedToken('refresh_token');
+    const currentToken = storedToken('access_token');
+    // Another request may already have refreshed this expired access token.
+    const nextToken = currentToken && currentToken !== token
+      ? currentToken
+      : refreshToken ? await refreshAccessToken(refreshToken, session) : null;
+    options.signal?.throwIfAborted();
+    ensureCurrentSession();
+    if (nextToken) {
+      headers.set('Authorization', `Bearer ${nextToken}`);
+      response = await fetch(`${BASE_URL}${url}`, config);
+      ensureCurrentSession();
+      if (response.status === 401 && storedToken('access_token') === nextToken) {
+        clearSessionAndRedirect(storedToken('refresh_token'), session);
       }
-    } else {
-      clearSessionAndRedirect();
+    } else if (!refreshToken) {
+      clearSessionAndRedirect(null, session);
     }
   }
 
-  if (!response.ok) {
-    let data: APIErrorPayload | null;
-    try {
-      data = await response.json();
-    } catch {
-      data = null;
-    }
-    const message =
-      (typeof data?.error?.message === 'string' ? data.error.message : null) ??
-      (typeof data?.detail === 'string' ? data.detail : null) ??
-      'An error occurred';
-    throw new APIError(message, response.status, data, responseRequestId(response, data));
-  }
+  if (!response.ok) throw await responseError(response);
+  return { response, ensureCurrentSession };
+}
 
+async function fetchWithAuth(url: string, options: RequestInit = {}) {
+  const { response, ensureCurrentSession } = await authenticatedResponse(url, options);
   // Handle empty responses
   const text = await response.text();
+  ensureCurrentSession();
   return text ? JSON.parse(text) : null;
 }
 
@@ -132,31 +214,13 @@ export async function downloadFile(
   filename: string,
   init: { method?: string; body?: unknown } = {}
 ): Promise<void> {
-  const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
-  const headers = new Headers();
-  if (token) headers.set('Authorization', `Bearer ${token}`);
-  if (init.body !== undefined) headers.set('Content-Type', 'application/json');
-  const response = await fetch(`${BASE_URL}${url}`, {
+  const { response, ensureCurrentSession } = await authenticatedResponse(url, {
     method: init.method ?? 'GET',
-    headers,
     body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
   });
 
-  if (!response.ok) {
-    let data: APIErrorPayload | null = null;
-    try {
-      data = await response.json();
-    } catch {
-      data = null;
-    }
-    const message =
-      (typeof data?.error?.message === 'string' ? data.error.message : null) ??
-      (typeof data?.detail === 'string' ? data.detail : null) ??
-      'Ошибка скачивания';
-    throw new APIError(message, response.status, data, responseRequestId(response, data));
-  }
-
   const blob = await response.blob();
+  ensureCurrentSession();
   const objectUrl = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = objectUrl;
@@ -188,8 +252,8 @@ export function asError(err: unknown): ApiErrorShape {
 }
 
 export function errorMessage(err: unknown, fallback = 'Произошла ошибка'): string {
-  if (err instanceof TypeError && err.message === 'Failed to fetch') {
-    return 'Не удалось соединиться с сервером. Проверьте, что backend запущен (http://localhost:8000), и обновите страницу.';
+  if (err instanceof TypeError && /fetch|network|load failed/i.test(err.message)) {
+    return 'Не удалось соединиться с сервером. Проверьте подключение к интернету и повторите попытку.';
   }
   if (err instanceof APIError) {
     const message = err.message || fallback;

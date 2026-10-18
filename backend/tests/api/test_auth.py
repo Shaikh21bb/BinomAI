@@ -96,6 +96,36 @@ async def test_login_rate_limit_stops_upstream_request(client, mock_httpx_client
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "endpoint,payload",
+    [
+        ("login", {"email": "test@test.com", "password": "password"}),
+        ("refresh", {"refresh_token": "refresh-token"}),
+    ],
+)
+@pytest.mark.parametrize("upstream_status,expected_status", [(429, 429), (500, 503), (503, 503)])
+async def test_temporary_auth_provider_error_is_not_invalid_credentials(
+    client, mock_httpx_client, endpoint, payload, upstream_status, expected_status
+):
+    upstream_response = MagicMock(status_code=upstream_status)
+    upstream_response.headers = {"retry-after": "45"}
+    upstream_client = mock_httpx_client.return_value.__aenter__.return_value
+    upstream_client.post.return_value = upstream_response
+
+    response = await client.post(f"/api/v1/auth/{endpoint}", json=payload)
+
+    assert response.status_code == expected_status
+    assert "Неверный email" not in response.text
+    assert "Недействительный refresh" not in response.text
+    if upstream_status == 429:
+        assert response.headers["retry-after"] == "45"
+    else:
+        assert response.json()["error"]["message"] == (
+            "Сервис авторизации временно недоступен. Попробуйте ещё раз."
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "transport_error",
     [
         "Connection refused",
@@ -220,7 +250,11 @@ async def test_protected_route_with_invalid_token(client, mock_verify_jwt):
 async def test_refresh_token_success(client, mock_httpx_client):
     mock_response = MagicMock()
     mock_response.status_code = 200
-    mock_response.json.return_value = {"access_token": "new_access", "expires_in": 3600}
+    mock_response.json.return_value = {
+        "access_token": "new_access",
+        "refresh_token": "rotated_refresh",
+        "expires_in": 3600,
+    }
 
     mock_client_instance = mock_httpx_client.return_value.__aenter__.return_value
     mock_client_instance.post.return_value = mock_response
@@ -229,6 +263,21 @@ async def test_refresh_token_success(client, mock_httpx_client):
 
     assert response.status_code == 200
     assert response.json()["access_token"] == "new_access"
+    assert response.json()["refresh_token"] == "rotated_refresh"
+
+
+@pytest.mark.asyncio
+async def test_refresh_token_without_rotation_remains_compatible(client, mock_httpx_client):
+    mock_response = MagicMock(status_code=200)
+    mock_response.json.return_value = {"access_token": "new_access", "expires_in": 3600}
+    mock_client_instance = mock_httpx_client.return_value.__aenter__.return_value
+    mock_client_instance.post.return_value = mock_response
+
+    response = await client.post("/api/v1/auth/refresh", json={"refresh_token": "rt"})
+
+    assert response.status_code == 200
+    assert response.json()["access_token"] == "new_access"
+    assert response.json()["refresh_token"] is None
 
 
 @pytest.mark.asyncio

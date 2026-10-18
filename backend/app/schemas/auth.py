@@ -46,6 +46,7 @@ class RegisterResponse(BaseModel):
 
 class RefreshResponse(BaseModel):
     access_token: str
+    refresh_token: Optional[str] = None
     expires_in: int
 
 class ForgotPasswordRequest(BaseModel):

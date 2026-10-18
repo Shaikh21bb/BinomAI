@@ -9,7 +9,7 @@
   --color-on-tertiary-container: #2f3745;
   --color-tertiary: #5c6675;
   --color-error-container: #ffe9eb;
-  --color-outline-variant: #dfe4f0;
+  --color-outline-variant: #e3e8f0;
   --color-on-primary-fixed-variant: #0046a8;
   --color-on-error: #ffffff;
   --color-tertiary-fixed-dim: #c7cee0;
@@ -23,23 +23,23 @@
   --color-surface-bright: #ffffff;
   --color-surface: #ffffff;
   --color-secondary-fixed-dim: #c2cbde;
-  --color-primary: #0a5ed7;
-  --color-background: #f8faff;
+  --color-primary: #2865dc;
+  --color-background: #f5f7fb;
   --color-on-tertiary-fixed: #2f3745;
-  --color-on-background: #101418;
+  --color-on-background: #17253e;
   --color-on-primary-container: #0a274d;
   --color-primary-fixed-dim: #aec9ff;
   --color-outline: #7a8291;
   --color-secondary-fixed: #dde4f3;
   --color-on-secondary: #ffffff;
-  --color-on-surface-variant: #5b6472;
+  --color-on-surface-variant: #647188;
   --color-error: #d70015;
   --color-on-secondary-fixed-variant: #3a4557;
   --color-tertiary-container: #e3e8f4;
   --color-primary-fixed: #d8e4ff;
   --color-surface-tint: #0a5ed7;
   --color-secondary-container: #dde4f3;
-  --color-surface-container-low: #f3f5fc;
+  --color-surface-container-low: #f5f7fb;
   --color-surface-container-lowest: #ffffff;
   --color-on-secondary-fixed: #2a3448;
   --color-tertiary-fixed: #e3e8f4;
@@ -47,16 +47,16 @@
   --color-inverse-surface: #20283a;
   --color-on-primary-fixed: #0a274d;
   --color-primary-container: #d8e4ff;
-  --color-on-surface: #101418;
+  --color-on-surface: #17253e;
 
-  /* ---- Sharp, minimal radii ---- */
-  --radius-DEFAULT: 0.125rem;
-  --radius-sm: 0.125rem;
-  --radius-md: 0.25rem;
-  --radius-lg: 0.25rem;
-  --radius-xl: 0.375rem;
-  --radius-2xl: 0.5rem;
-  --radius-3xl: 0.75rem;
+  /* Shared control and panel shapes. */
+  --radius-DEFAULT: 0.375rem;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.625rem;
+  --radius-xl: 0.875rem;
+  --radius-2xl: 1rem;
+  --radius-3xl: 1.5rem;
   --radius-full: 9999px;
 
   --spacing-container-max: 1440px;
@@ -72,18 +72,25 @@
   --spacing-stack-gap-sm: 8px;
 
   /* ---- Typography: geometric grotesque for display, Inter for body ---- */
-  --font-mono-sm: "JetBrains Mono", monospace;
-  --font-body-lg: "Inter", sans-serif;
-  --font-headline-xl: "Manrope", "Inter", sans-serif;
-  --font-headline-md: "Manrope", "Inter", sans-serif;
-  --font-headline-lg: "Manrope", "Inter", sans-serif;
-  --font-label-md: "Inter", sans-serif;
-  --font-body-sm: "Manrope", "Inter", sans-serif;
-  --font-body-md: "Inter", sans-serif;
-  --font-display: "Manrope", "Inter", sans-serif;
+  --font-mono-sm: var(--font-jetbrains-mono), monospace;
+  --font-body-lg: var(--font-inter), sans-serif;
+  --font-headline-xl: var(--font-manrope), var(--font-inter), sans-serif;
+  --font-headline-md: var(--font-manrope), var(--font-inter), sans-serif;
+  --font-headline-lg: var(--font-manrope), var(--font-inter), sans-serif;
+  --font-label-md: var(--font-inter), sans-serif;
+  --font-body-sm: var(--font-inter), sans-serif;
+  --font-body-md: var(--font-inter), sans-serif;
+  --font-display: var(--font-manrope), var(--font-inter), sans-serif;
 }
 
 @layer base {
+  html { color-scheme: light; }
+  html[data-theme="dark"] { color-scheme: dark; }
+  body { font-family: var(--font-inter), sans-serif; }
+  button:not(:disabled), [role="button"]:not([aria-disabled="true"]), summary { cursor: pointer; }
+  ::selection { background: #2865dc25; }
+  :focus-visible { outline: 3px solid var(--color-primary); outline-offset: 3px; }
+
   /* ---- Dark theme: blue-tinted, readable ---- */
   html[data-theme="dark"] {
     --color-surface-container-highest: #232b3e;
@@ -143,7 +150,7 @@
     --spacing-gutter: 24px;
     --spacing-stack-lg: 32px;
     --spacing-stack-sm: 8px;
-    --spacing-margin-page: 40px;
+    --spacing-margin-page: 32px;
   }
 }
 
@@ -194,10 +201,10 @@
 }
 
 .theme-tenderpro {
-  --display-size: 44px;
-  --display-lh: 48px;
-  --display-ls: -0.045em;
-  --display-fw: 800;
+  --display-size: clamp(28px, 3vw, 36px);
+  --display-lh: 1.2;
+  --display-ls: -0.04em;
+  --display-fw: 750;
   --headline-xl-size: 30px;
   --headline-xl-lh: 36px;
   --headline-xl-ls: -0.035em;
@@ -304,6 +311,31 @@ html.js .reveal-init {
 }
 
 @utility border-crisp { border-width: 1px; border-style: solid; }
+
+/* Contrast for the existing inverse buttons throughout the product. */
+.bg-on-background.text-on-primary { color: var(--color-background); }
+
+.skip-link {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  z-index: 200;
+  padding: 12px 18px;
+  border-radius: 10px;
+  background: var(--color-primary);
+  color: var(--color-on-primary);
+  transform: translateY(-160%);
+}
+.skip-link:focus { transform: translateY(0); }
+.mobile-workspace-nav { padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+.workspace-sidebar { overflow-y: auto; scrollbar-width: thin; scrollbar-color: #32435e transparent; }
+.workspace-content { animation: workspace-enter 220ms ease-out; }
+@keyframes workspace-enter { from { opacity: 0.5; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+  html.js .reveal-init { opacity: 1; transform: none; }
+}
 
 /* AI / demo helpers */
 @layer utilities {

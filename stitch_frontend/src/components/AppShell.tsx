@@ -6,31 +6,40 @@ import { usePathname } from 'next/navigation';
 import { TenderProSidebar } from '@/components/TenderProSidebar';
 import { Header } from '@/components/Header';
 import { Onboarding } from '@/components/Onboarding';
-import { useTheme } from '@/hooks/useTheme';
 import { useAuth } from '@/contexts/AuthContext';
 
 const MOBILE_NAV = [
-  { href: '/dashboard', label: 'Тендеры', icon: 'work' },
+  { href: '/dashboard', label: 'Обзор', icon: 'space_dashboard' },
+  { href: '/tenders', label: 'Тендеры', icon: 'work_outline' },
+  { href: '/quick-check', label: 'Проверка', icon: 'travel_explore' },
   { href: '/settings', label: 'Настройки', icon: 'settings' },
 ];
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
-  const { theme, toggle } = useTheme();
   const { user } = useAuth();
 
   return (
-    <div className="theme-tenderpro min-h-screen flex flex-col text-body-md bg-background w-full overflow-x-clip pb-16 md:pb-0">
+    <div className="workspace-shell theme-tenderpro min-h-screen flex flex-col text-body-md bg-background w-full overflow-x-clip pb-20 md:pb-0">
+      <a href="#workspace-content" className="skip-link">
+        Перейти к содержимому
+      </a>
       <TenderProSidebar />
-      <main className="ml-0 md:ml-[280px] min-h-screen flex flex-col w-full md:w-[calc(100%-280px)]">
+      <main className="ml-0 md:ml-64 min-h-screen min-w-0 flex flex-col w-full md:w-[calc(100%_-_256px)]">
         <Header />
-        <div className="flex-1 flex flex-col min-h-0">{children}</div>
+        <div
+          id="workspace-content"
+          tabIndex={-1}
+          className="workspace-content flex-1 flex flex-col min-h-0 outline-none"
+        >
+          {children}
+        </div>
       </main>
 
       {/* Mobile bottom navigation */}
       <nav
         aria-label="Мобильная навигация"
-        className="md:hidden fixed bottom-0 inset-x-0 z-50 bg-surface-container-lowest border-t border-outline-variant flex items-center justify-around px-4 py-2"
+        className="mobile-workspace-nav md:hidden fixed bottom-0 inset-x-0 z-50 bg-surface-container-lowest/95 backdrop-blur-xl border-t border-outline-variant flex items-center justify-around px-1 py-2"
       >
         {MOBILE_NAV.map((item) => {
           const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
@@ -38,11 +47,14 @@ export function AppShell({ children }: { children: ReactNode }) {
             <Link
               key={item.href}
               href={item.href}
-              className={`flex flex-col items-center gap-0.5 px-4 py-1.5 rounded-lg text-label-md font-label-md transition-colors ${
-                active ? 'text-primary font-bold' : 'text-on-surface-variant'
+              aria-current={active ? 'page' : undefined}
+              className={`flex min-w-0 flex-1 flex-col items-center gap-1 px-1 py-1.5 rounded-xl text-[10px] font-medium transition-colors ${
+                active ? 'bg-primary/8 text-primary font-bold' : 'text-on-surface-variant'
               }`}
             >
-              <span className="material-symbols-outlined text-[22px]">{item.icon}</span>
+              <span className="material-symbols-outlined text-[22px]" aria-hidden="true">
+                {item.icon}
+              </span>
               {item.label}
             </Link>
           );
@@ -50,24 +62,17 @@ export function AppShell({ children }: { children: ReactNode }) {
         {user?.role === 'owner' && (
           <Link
             href="/admin"
-            className={`flex flex-col items-center gap-0.5 px-4 py-1.5 rounded-lg text-label-md font-label-md transition-colors ${
+            aria-current={pathname.startsWith('/admin') ? 'page' : undefined}
+            className={`flex min-w-0 flex-1 flex-col items-center gap-1 px-1 py-1.5 rounded-xl text-[10px] font-medium transition-colors ${
               pathname.startsWith('/admin') ? 'text-primary font-bold' : 'text-on-surface-variant'
             }`}
           >
-            <span className="material-symbols-outlined text-[22px]">shield_person</span>
+            <span className="material-symbols-outlined text-[22px]" aria-hidden="true">
+              shield_person
+            </span>
             Доступ
           </Link>
         )}
-          <button
-            onClick={toggle}
-            aria-label="Переключить тему"
-          className="flex flex-col items-center gap-0.5 px-4 py-1.5 rounded-lg text-label-md font-label-md text-on-surface-variant transition-colors"
-        >
-          <span className="material-symbols-outlined text-[22px]">
-            {theme === 'dark' ? 'light_mode' : 'dark_mode'}
-          </span>
-          Тема
-        </button>
       </nav>
 
       <Onboarding />

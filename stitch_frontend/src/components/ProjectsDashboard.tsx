@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import Link from 'next/link';
 import { api, errorMessage } from '@/lib/api';
-import { StatusBadge, EmptyState, formatDate } from '@/components/ui';
+import { StatusBadge, formatDate } from '@/components/ui';
 import { NewTenderDialog } from '@/components/NewTenderDialog';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -22,7 +22,7 @@ export interface Project {
   updated_at?: string;
 }
 
-const STATUS_OPTIONS: { value: string; label: string }[] = [
+const STATUS_OPTIONS = [
   { value: 'all', label: 'Все статусы' },
   { value: 'draft', label: 'Черновик' },
   { value: 'processing', label: 'Обработка' },
@@ -34,15 +34,85 @@ const STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: 'ready', label: 'Готово' },
   { value: 'done', label: 'Завершён' },
   { value: 'submitted', label: 'Подан' },
+  { value: 'archived', label: 'Архив' },
   { value: 'error', label: 'Ошибка' },
 ];
+const CLOSED_STATUSES = new Set(['done', 'submitted', 'archived']);
+const WORK_STATUSES = new Set([
+  'draft',
+  'processing',
+  'analyzing',
+  'clarifying',
+  'generating',
+  'searching',
+]);
+const DAY_MS = 86_400_000;
+const FIELD_CLASS =
+  'w-full rounded-xl border border-outline-variant bg-surface-container-lowest px-3.5 py-2.5 text-sm text-on-surface outline-none transition focus:border-primary focus:ring-4 focus:ring-primary/10';
+
+function Icon({ name, className = '' }: { name: string; className?: string }) {
+  return (
+    <span aria-hidden="true" className={`material-symbols-outlined ${className}`}>
+      {name}
+    </span>
+  );
+}
 
 function toLocalInput(iso?: string): string {
   if (!iso) return '';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
   const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function deadlineState(project: Project, now: number) {
+  if (!project.deadline_at || CLOSED_STATUSES.has(project.status)) return 'none';
+  const remaining = new Date(project.deadline_at).getTime() - now;
+  if (!Number.isFinite(remaining)) return 'none';
+  if (remaining < 0) return 'overdue';
+  if (remaining <= 7 * DAY_MS) return 'soon';
+  return 'scheduled';
+}
+
+function DashboardDialog({
+  titleId,
+  children,
+  onClose,
+}: {
+  titleId: string;
+  children: ReactNode;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const dialog = ref.current;
+    dialog?.showModal();
+    return () => dialog?.close();
+  }, []);
+  return (
+    <dialog
+      ref={ref}
+      aria-labelledby={titleId}
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+      onMouseDown={(event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        if (
+          event.clientX < rect.left ||
+          event.clientX > rect.right ||
+          event.clientY < rect.top ||
+          event.clientY > rect.bottom
+        )
+          onClose();
+      }}
+      className="fixed m-auto max-h-[90dvh] w-[calc(100%_-_2rem)] max-w-xl overflow-y-auto rounded-2xl border border-outline-variant bg-surface-bright p-0 text-on-surface shadow-2xl backdrop:bg-slate-950/45 backdrop:backdrop-blur-sm"
+    >
+      {children}
+    </dialog>
+  );
 }
 
 interface Props {
@@ -50,15 +120,17 @@ interface Props {
   pageDescription?: string;
 }
 
-export function ProjectsDashboard({ pageLabel = 'Мои тендеры', pageDescription }: Props) {
-  const router = useRouter();
+export function ProjectsDashboard({ pageLabel = 'Рабочий стол', pageDescription }: Props) {
   const { user } = useAuth();
   const [projects, setProjects] = useState<Project[]>([]);
   const [pagination, setPagination] = useState<{ has_next: boolean; next_cursor?: string | null }>({
     has_next: false,
   });
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [error, setError] = useState('');
+  const [mutationError, setMutationError] = useState('');
+  const [notice, setNotice] = useState('');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -67,68 +139,96 @@ export function ProjectsDashboard({ pageLabel = 'Мои тендеры', pageDes
   const [editTarget, setEditTarget] = useState<Project | null>(null);
   const [editDraft, setEditDraft] = useState<Partial<Project> | null>(null);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const requestRef = useRef<AbortController | null>(null);
 
-  const loadProjects = async (cursor?: string) => {
-    try {
-      const params = new URLSearchParams({ page_size: '20' });
-      if (cursor) params.set('cursor', cursor);
-      if (search.trim()) params.set('search', search.trim());
-      if (statusFilter !== 'all') params.set('status', statusFilter);
-      const url = `/projects/?${params.toString()}`;
+  const loadProjects = useCallback(
+    async (cursor?: string) => {
+      requestRef.current?.abort();
+      const controller = new AbortController();
+      requestRef.current = controller;
+      setError('');
+      setIsLoadingMore(Boolean(cursor));
       if (!cursor) setIsLoading(true);
-      const res = await api.get(url);
-      const list = res?.data ?? [];
-      const meta = res?.pagination ?? {};
-      if (cursor) {
-        setProjects((prev) => {
-          const seen = new Set(prev.map((p) => p.id));
-          return [...prev, ...list.filter((p: Project) => !seen.has(p.id))];
+      try {
+        const params = new URLSearchParams({ page_size: '20' });
+        if (cursor) params.set('cursor', cursor);
+        if (search.trim()) params.set('search', search.trim());
+        if (statusFilter !== 'all') params.set('status', statusFilter);
+        const response = await api.get(`/projects/?${params}`, { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        const list: Project[] = response?.data ?? [];
+        setProjects((previous) => {
+          if (!cursor) return list;
+          const seen = new Set(previous.map((project) => project.id));
+          return [...previous, ...list.filter((project) => !seen.has(project.id))];
         });
-      } else {
-        setProjects(list);
+        setPagination({
+          has_next: Boolean(response?.pagination?.has_next),
+          next_cursor: response?.pagination?.next_cursor ?? null,
+        });
+        setLastUpdated(new Date());
+      } catch (err) {
+        if (!controller.signal.aborted) setError(errorMessage(err, 'Не удалось загрузить тендеры'));
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsLoading(false);
+          setIsLoadingMore(false);
+        }
       }
-      setPagination({
-        has_next: Boolean(meta.has_next),
-        next_cursor: meta.next_cursor ?? null,
-      });
-    } catch (err) {
-      setError(errorMessage(err, 'Не удалось загрузить тендеры'));
-    } finally {
-      if (!cursor) setIsLoading(false);
-    }
-  };
+    },
+    [search, statusFilter]
+  );
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      loadProjects();
+      void loadProjects();
     }, 250);
-    return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, statusFilter]);
+    return () => {
+      clearTimeout(timer);
+      requestRef.current?.abort();
+    };
+  }, [loadProjects]);
 
   useEffect(() => {
-    if (dialogOpen) return;
+    const openNewTender = () => setDialogOpen(true);
+    window.addEventListener('binom:new-tender', openNewTender);
     const timer = setTimeout(() => {
-      const params = new URLSearchParams(window.location.search);
-      if (params.get('new') === '1') {
+      const url = new URL(window.location.href);
+      if (url.searchParams.get('new') === '1') {
         setDialogOpen(true);
-        const url = new URL(window.location.href);
         url.searchParams.delete('new');
         window.history.replaceState(null, '', url.toString());
       }
     }, 0);
-    return () => clearTimeout(timer);
-  }, [dialogOpen]);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener('binom:new-tender', openNewTender);
+    };
+  }, []);
 
+  const closeEdit = () => {
+    if (isSavingEdit) return;
+    setEditTarget(null);
+    setEditDraft(null);
+    setMutationError('');
+  };
+  const closeDelete = () => {
+    if (isDeleting) return;
+    setDeleteTarget(null);
+    setMutationError('');
+  };
   const handleDelete = async () => {
     if (!deleteTarget) return;
     setIsDeleting(true);
+    setMutationError('');
     try {
       await api.delete(`/projects/${deleteTarget.id}`);
-      setProjects((prev) => prev.filter((p) => p.id !== deleteTarget.id));
+      setProjects((previous) => previous.filter((project) => project.id !== deleteTarget.id));
       setDeleteTarget(null);
+      setNotice('Тендер удалён.');
     } catch (err) {
-      setError(errorMessage(err, 'Не удалось удалить тендер'));
+      setMutationError(errorMessage(err, 'Не удалось удалить тендер'));
     } finally {
       setIsDeleting(false);
     }
@@ -137,458 +237,803 @@ export function ProjectsDashboard({ pageLabel = 'Мои тендеры', pageDes
   const handleSaveEdit = async () => {
     if (!editTarget || !editDraft) return;
     if (!editDraft.name?.trim()) {
-      setError('Название тендера обязательно');
+      setMutationError('Укажите название тендера.');
       return;
     }
     setIsSavingEdit(true);
-    setError('');
+    setMutationError('');
     try {
       const body: Record<string, unknown> = {
         name: editDraft.name.trim(),
         status: editDraft.status || 'draft',
+        customer_name: editDraft.customer_name?.trim() || null,
+        tender_number: editDraft.tender_number?.trim() || null,
+        tender_type: editDraft.tender_type?.trim() || null,
+        complexity: editDraft.complexity || null,
+        notes: editDraft.notes?.trim() || null,
+        deadline_at: editDraft.deadline_at ? new Date(editDraft.deadline_at).toISOString() : null,
       };
-      if (editDraft.customer_name) body.customer_name = editDraft.customer_name;
-      if (editDraft.tender_number) body.tender_number = editDraft.tender_number;
-      if (editDraft.tender_type) body.tender_type = editDraft.tender_type;
-      if (editDraft.complexity) body.complexity = editDraft.complexity;
-      if (editDraft.notes) body.notes = editDraft.notes;
-      if (editDraft.deadline_at) body.deadline_at = new Date(editDraft.deadline_at).toISOString();
       const updated = await api.patch(`/projects/${editTarget.id}`, body);
-      setProjects((prev) => prev.map((p) => (p.id === editTarget.id ? { ...p, ...updated } : p)));
+      setProjects((previous) =>
+        previous
+          .map((project) => (project.id === editTarget.id ? { ...project, ...updated } : project))
+          .filter((project) => statusFilter === 'all' || project.status === statusFilter)
+      );
       setEditTarget(null);
       setEditDraft(null);
+      setNotice('Изменения сохранены.');
+      if (search.trim()) void loadProjects();
     } catch (err) {
-      setError(errorMessage(err, 'Не удалось сохранить изменения'));
+      setMutationError(errorMessage(err, 'Не удалось сохранить изменения'));
     } finally {
       setIsSavingEdit(false);
     }
   };
 
   const stats = useMemo(() => {
-    const active = new Set(['draft', 'processing', 'analyzing', 'clarifying', 'generating', 'searching']);
-    const finished = new Set(['ready', 'done', 'submitted', 'review', 'archived']);
+    const now = lastUpdated?.getTime() ?? 0;
+    const openDeadlines = projects.filter((project) =>
+      ['soon', 'overdue'].includes(deadlineState(project, now))
+    );
     return {
-      total: projects.length,
-      inProgress: projects.filter((p) => active.has(p.status)).length,
-      finished: projects.filter((p) => finished.has(p.status)).length,
+      working: projects.filter((project) => WORK_STATUSES.has(project.status)).length,
+      review: projects.filter((project) => project.status === 'review').length,
+      ready: projects.filter((project) => ['ready', 'done', 'submitted'].includes(project.status))
+        .length,
+      soon: projects.filter((project) => deadlineState(project, now) === 'soon').length,
+      overdue: projects.filter((project) => deadlineState(project, now) === 'overdue').length,
+      nearest: openDeadlines.sort(
+        (a, b) => new Date(a.deadline_at!).getTime() - new Date(b.deadline_at!).getTime()
+      )[0],
     };
-  }, [projects]);
+  }, [projects, lastUpdated]);
 
-  const STAT_CARDS = [
-    { label: 'Всего тендеров', value: stats.total, icon: 'folder_open' },
-    { label: 'В работе', value: stats.inProgress, icon: 'hourglass_top' },
-    { label: 'Завершено / подано', value: stats.finished, icon: 'task_alt' },
+  const hasFilters = Boolean(search.trim() || statusFilter !== 'all');
+  const resetFilters = () => {
+    setSearch('');
+    setStatusFilter('all');
+  };
+  const now = lastUpdated?.getTime() ?? 0;
+  const statCards = [
+    {
+      label: 'В работе',
+      value: stats.working,
+      icon: 'work_outline',
+      note: 'Подготовка и AI-анализ',
+      color: 'text-primary bg-primary/10',
+    },
+    {
+      label: 'На проверке',
+      value: stats.review,
+      icon: 'fact_check',
+      note: 'Нужно решение команды',
+      color: 'text-violet-600 bg-violet-500/10',
+    },
+    {
+      label: 'Срок до 7 дней',
+      value: stats.soon,
+      icon: 'event_upcoming',
+      note: 'Ближайшие дедлайны',
+      color: 'text-amber-600 bg-amber-500/10',
+    },
+    {
+      label: 'Готово / подано',
+      value: stats.ready,
+      icon: 'task_alt',
+      note: 'Подготовленные тендеры',
+      color: 'text-emerald-600 bg-emerald-500/10',
+    },
   ];
 
   return (
-    <div className="p-4 md:p-margin-page max-w-container-max w-full mx-auto flex-1 theme-tenderpro">
-      {/* Page header */}
-      <div className="flex flex-wrap items-end justify-between gap-4 mb-6">
+    <div className="theme-tenderpro mx-auto w-full max-w-[1600px] flex-1 px-4 py-6 sm:px-6 lg:px-9 lg:py-8">
+      <div className="mb-7 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h2 className="text-display font-display text-on-surface tracking-tight">{pageLabel}</h2>
-          {pageDescription && (
-            <p className="text-body-lg font-body-lg text-on-surface-variant mt-1">{pageDescription}</p>
-          )}
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <button
-            onClick={() => router.push('/quick-check')}
-            className="flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/10 px-4 py-2 text-label-md font-label-md text-primary transition-colors hover:bg-primary/20"
-          >
-            <span className="material-symbols-outlined text-[18px]">bolt</span>
-            Быстро проверить PDF
-          </button>
-          <button
-            onClick={() => setDialogOpen(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-on-background text-on-primary rounded-lg text-label-md font-label-md hover:opacity-90 transition-opacity shadow-sm active:scale-[0.98] duration-150"
-          >
-            <span className="material-symbols-outlined text-[18px]">add</span>
-            Новый тендер
-          </button>
-        </div>
-      </div>
-
-      {/* Limited access banner */}
-      {user?.role === 'limited' && (
-        <div className="mb-6 p-4 bg-primary/5 border border-primary/20 rounded-lg flex flex-wrap items-center gap-3">
-          <span className="material-symbols-outlined text-[20px] text-primary shrink-0">lock</span>
-          <p className="flex-1 min-w-[200px] text-body-sm font-body-sm text-on-surface">
-            Ограниченный доступ: использовано {projects.length} из 2 доступных тендеров.
-            Для полного доступа запросите инвайт-код у владельца платформы.
+          <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-on-surface-variant">
+            Закупки под контролем
+          </p>
+          <h1 className="text-[28px] font-semibold leading-tight tracking-[-0.04em] text-on-surface sm:text-[34px]">
+            {pageLabel}
+          </h1>
+          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-on-surface-variant">
+            {pageDescription ||
+              'Тендеры, поставщики и подготовка документов — в одном рабочем пространстве.'}
           </p>
         </div>
-      )}
+        <button
+          onClick={() => setDialogOpen(true)}
+          className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-primary px-4 text-sm font-semibold text-on-primary shadow-sm transition hover:opacity-90"
+        >
+          <Icon name="add" className="text-xl" />
+          Новый тендер
+        </button>
+      </div>
 
-      {/* Stats */}
-      {!isLoading && projects.length > 0 && (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
-          {STAT_CARDS.map((card) => (
-            <div
-              key={card.label}
-              className="flex items-center gap-4 bg-surface-container-lowest border border-outline-variant rounded-lg p-stack-md"
-            >
-              <div className="w-10 h-10 rounded-lg bg-primary/10 text-primary flex items-center justify-center shrink-0">
-                <span className="material-symbols-outlined text-[22px]">{card.icon}</span>
-              </div>
-              <div>
-                <div className="text-headline-lg font-headline-lg text-on-surface leading-none">{card.value}</div>
-                <div className="text-label-md font-label-md text-on-surface-variant mt-1">{card.label}</div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Toolbar */}
-      <div className="flex flex-wrap items-center gap-3 mb-6">
-        <div className="relative flex-1 min-w-[220px] max-w-sm">
-          <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant text-[18px]">
-            search
-          </span>
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Поиск по названию, заказчику, номеру..."
-            className="w-full pl-9 pr-9 py-2 bg-surface-bright border border-outline-variant rounded-lg text-body-md font-body-md text-on-surface focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-colors"
+      <div className="mb-7 grid gap-4 lg:grid-cols-[minmax(0,1.65fr)_minmax(280px,1fr)]">
+        <section className="relative overflow-hidden rounded-2xl border border-blue-500/25 bg-[#122b58] px-6 py-7 text-white sm:px-8">
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute -right-14 -top-20 h-72 w-72 rounded-full border-[45px] border-white/[0.035]"
           />
-          {search && (
-            <button
-              onClick={() => setSearch('')}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-on-surface"
-              aria-label="Очистить поиск"
-            >
-              <span className="material-symbols-outlined text-[18px]">close</span>
-            </button>
-          )}
-        </div>
-
-        <div className="relative">
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="appearance-none pl-9 pr-9 py-2 bg-surface-bright border border-outline-variant rounded-lg text-body-md font-body-md text-on-surface focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-colors cursor-pointer"
+          <div
+            aria-hidden="true"
+            className="absolute right-8 top-7 hidden h-16 w-16 rotate-6 items-center justify-center rounded-2xl border border-white/15 bg-white/5 sm:flex"
           >
-            {STATUS_OPTIONS.map((s) => (
-              <option key={s.value} value={s.value}>
-                {s.label}
+            <Icon name="find_in_page" className="text-[34px] text-blue-200" />
+          </div>
+          <p className="mb-4 inline-flex items-center gap-2 text-xs font-medium text-blue-200">
+            <Icon name="bolt" className="text-base" />
+            Быстрая проверка
+          </p>
+          <h2 className="max-w-md text-[24px] font-semibold leading-tight tracking-[-0.03em] sm:text-[28px]">
+            От технического задания
+            <br />к предложениям продавцов
+          </h2>
+          <p className="mt-3 max-w-md text-sm leading-relaxed text-blue-100/75">
+            Загрузите PDF или Word: извлеките позиции и найдите товары, цены и контакты для
+            проверки.
+          </p>
+          <div className="mt-6 flex flex-wrap items-center gap-4">
+            <Link
+              href="/quick-check"
+              className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-white px-4 text-sm font-semibold text-[#122b58] shadow-sm transition hover:bg-blue-50"
+            >
+              Проверить документ
+              <Icon name="arrow_forward" className="text-lg" />
+            </Link>
+            <span className="text-xs text-blue-100/65">PDF · DOCX</span>
+          </div>
+        </section>
+
+        <section className="flex flex-col rounded-2xl border border-outline-variant bg-surface-container-lowest p-6">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold text-on-surface">Следующий шаг</h2>
+            <Icon name="explore" className="text-xl text-primary" />
+          </div>
+          {isLoading ? (
+            <div className="space-y-3" aria-label="Загрузка приоритетов">
+              <div className="shimmer h-5 w-3/4 rounded" />
+              <div className="shimmer h-4 w-full rounded" />
+              <div className="shimmer h-4 w-2/3 rounded" />
+            </div>
+          ) : error && !lastUpdated ? (
+            <>
+              <p className="text-base font-semibold text-on-surface">Обновите данные</p>
+              <p className="mt-2 text-sm leading-relaxed text-on-surface-variant">
+                Список тендеров недоступен. Повторите загрузку, чтобы увидеть актуальные задачи.
+              </p>
+              <button
+                onClick={() => void loadProjects()}
+                className="mt-auto inline-flex items-center gap-2 pt-5 text-sm font-semibold text-primary"
+              >
+                Повторить загрузку
+                <Icon name="refresh" className="text-lg" />
+              </button>
+            </>
+          ) : stats.nearest ? (
+            <>
+              <p
+                className={`mb-2 text-xs font-semibold ${deadlineState(stats.nearest, now) === 'overdue' ? 'text-error' : 'text-amber-600'}`}
+              >
+                {deadlineState(stats.nearest, now) === 'overdue'
+                  ? 'Срок уже прошёл'
+                  : 'Приближается дедлайн'}{' '}
+                · {formatDate(stats.nearest.deadline_at)}
+              </p>
+              <p className="line-clamp-2 text-base font-semibold leading-snug text-on-surface">
+                {stats.nearest.name}
+              </p>
+              <p className="mt-2 text-sm leading-relaxed text-on-surface-variant">
+                Проверьте готовность документов и актуальность статуса.
+              </p>
+              <Link
+                href={`/projects/${stats.nearest.id}/document`}
+                className="mt-auto inline-flex items-center gap-2 pt-5 text-sm font-semibold text-primary"
+              >
+                Открыть тендер
+                <Icon name="arrow_forward" className="text-lg" />
+              </Link>
+            </>
+          ) : (
+            <>
+              <p className="text-base font-semibold text-on-surface">
+                {projects.length
+                  ? 'Продолжите подготовку'
+                  : hasFilters
+                    ? 'Измените выборку'
+                    : 'Начните с первого тендера'}
+              </p>
+              <p className="mt-2 text-sm leading-relaxed text-on-surface-variant">
+                {projects.length
+                  ? 'Откройте тендер, сравните найденные товары и рассчитайте экономику закупки.'
+                  : hasFilters
+                    ? 'По выбранным условиям тендеров нет. Сбросьте фильтры или выполните новый поиск.'
+                    : 'Создайте тендер и загрузите техническое задание. Документы, анализ и товары будут собраны в одном проекте.'}
+              </p>
+              {projects.length ? (
+                <Link
+                  href={`/projects/${projects[0].id}/products`}
+                  className="mt-auto inline-flex items-center gap-2 pt-5 text-sm font-semibold text-primary"
+                >
+                  Перейти к товарам
+                  <Icon name="arrow_forward" className="text-lg" />
+                </Link>
+              ) : (
+                <button
+                  onClick={hasFilters ? resetFilters : () => setDialogOpen(true)}
+                  className="mt-auto inline-flex items-center gap-2 pt-5 text-sm font-semibold text-primary"
+                >
+                  {hasFilters ? 'Сбросить фильтры' : 'Создать тендер'}
+                  <Icon name="arrow_forward" className="text-lg" />
+                </button>
+              )}
+            </>
+          )}
+        </section>
+      </div>
+
+      {user?.role === 'limited' && (
+        <div className="mb-5 flex items-start gap-3 rounded-xl border border-primary/20 bg-primary/5 p-4 text-sm text-on-surface">
+          <Icon name="lock" className="text-xl text-primary" />
+          <p>У вас ограниченный доступ. Полный доступ можно запросить у владельца платформы.</p>
+        </div>
+      )}
+
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold text-on-surface">Обзор загруженных тендеров</h2>
+        <span className="text-xs text-on-surface-variant">
+          {isLoading
+            ? 'Загружаем данные…'
+            : error && !lastUpdated
+              ? 'Данные недоступны'
+              : `${projects.length}${pagination.has_next ? '+' : ''} тендеров · показатели по загруженным данным`}
+        </span>
+      </div>
+      <div className="mb-7 grid grid-cols-2 gap-3 xl:grid-cols-4">
+        {statCards.map((card) => (
+          <div
+            key={card.label}
+            className="rounded-2xl border border-outline-variant bg-surface-container-lowest p-4 sm:p-5"
+          >
+            <div className="mb-4 flex items-center justify-between gap-2">
+              <p className="text-xs font-medium text-on-surface-variant sm:text-sm">{card.label}</p>
+              <span
+                className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${card.color}`}
+              >
+                <Icon name={card.icon} className="text-lg" />
+              </span>
+            </div>
+            {isLoading ? (
+              <div className="shimmer h-8 w-12 rounded" />
+            ) : (
+              <p className="text-[30px] font-semibold leading-none tracking-[-0.04em] text-on-surface">
+                {error && !lastUpdated ? '—' : card.value}
+              </p>
+            )}
+            <p className="mt-2 text-[11px] leading-relaxed text-on-surface-variant sm:text-xs">
+              {card.note}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      <section
+        className="overflow-hidden rounded-2xl border border-outline-variant bg-surface-container-lowest"
+        aria-labelledby="portfolio-heading"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-outline-variant px-5 py-5 sm:px-6">
+          <div>
+            <h2 id="portfolio-heading" className="text-base font-semibold text-on-surface">
+              Тендерный портфель
+            </h2>
+            <p className="mt-1 text-xs text-on-surface-variant">
+              Управляйте закупками от технического задания до подачи.
+            </p>
+          </div>
+          <button
+            onClick={() => void loadProjects()}
+            disabled={isLoading || isLoadingMore}
+            className="inline-flex min-h-9 items-center gap-2 rounded-lg border border-outline-variant px-3 text-xs font-medium text-on-surface-variant transition hover:bg-surface-container disabled:opacity-50"
+          >
+            <Icon name="refresh" className={`text-base ${isLoading ? 'animate-spin' : ''}`} />
+            Обновить
+          </button>
+        </div>
+        <div className="flex flex-col gap-3 border-b border-outline-variant bg-surface-container-low/40 px-5 py-4 sm:flex-row sm:items-center sm:px-6">
+          <div className="relative flex-1">
+            <Icon
+              name="search"
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-xl text-on-surface-variant"
+            />
+            <input
+              aria-label="Поиск тендеров"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Название, заказчик или номер тендера"
+              className={`${FIELD_CLASS} pl-10 pr-10`}
+            />
+            {search && (
+              <button
+                onClick={() => setSearch('')}
+                className="absolute right-3 top-1/2 flex -translate-y-1/2 text-on-surface-variant hover:text-on-surface"
+                aria-label="Очистить поиск"
+              >
+                <Icon name="close" className="text-lg" />
+              </button>
+            )}
+          </div>
+          <select
+            aria-label="Фильтр по статусу"
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value)}
+            className={`${FIELD_CLASS} sm:w-48`}
+          >
+            {STATUS_OPTIONS.map((status) => (
+              <option key={status.value} value={status.value}>
+                {status.label}
               </option>
             ))}
           </select>
-          <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant text-[18px] pointer-events-none">
-            filter_list
-          </span>
-          <span className="material-symbols-outlined absolute right-2.5 top-1/2 -translate-y-1/2 text-on-surface-variant text-[18px] pointer-events-none">
-            expand_more
-          </span>
-        </div>
-
-        <span className="ml-auto text-mono-sm font-mono-sm text-on-surface-variant">
-          Показано {projects.length}
-          {pagination.has_next ? ' · загрузить ещё' : ''}
-        </span>
-      </div>
-
-      {error && (
-        <div className="mb-6 p-4 bg-error-container text-on-error-container rounded-lg text-body-md font-body-md">
-          {error}
-          <button
-            onClick={() => loadProjects()}
-            className="ml-3 underline font-medium"
-          >
-            Повторить
-          </button>
-        </div>
-      )}
-
-      {isLoading ? (
-        <div className="flex flex-col gap-4">
-          {[0, 1, 2].map((i) => (
-            <div key={i} className="shimmer rounded-lg p-stack-md border border-outline-variant">
-              <div className="w-1/3 h-5 bg-surface-container-high rounded mb-3" />
-              <div className="w-2/3 h-4 bg-surface-container rounded mb-2" />
-              <div className="w-1/4 h-3 bg-surface-container rounded" />
-            </div>
-          ))}
-        </div>
-      ) : projects.length === 0 ? (
-        !search.trim() && statusFilter === 'all' ? (
-          <EmptyState
-            icon="folder_open"
-            title="Нет активных тендеров"
-            description="Создайте первый тендер, загрузите техническое задание — и AI сформирует для вас полный тендерный пакет."
-            action={{ label: 'Создать тендер', onClick: () => setDialogOpen(true) }}
-          />
-        ) : (
-          <EmptyState
-            icon="search_off"
-            title="Ничего не найдено"
-            description="Попробуйте изменить поисковый запрос или сбросить фильтр."
-            action={{ label: 'Сбросить фильтры', onClick: () => { setSearch(''); setStatusFilter('all'); } }}
-          />
-        )
-      ) : (
-        <div className="flex flex-col gap-4">
-          {projects.map((project) => (
-            <article
-              key={project.id}
-              onClick={() => router.push(`/projects/${project.id}/document`)}
-              className="group w-full bg-surface-container-lowest border border-outline-variant rounded-lg p-stack-md hover:border-on-background/20 hover:shadow-[0_4px_16px_rgba(0,0,0,0.04)] transition-all cursor-pointer"
-            >
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div className="flex flex-col gap-1 min-w-0">
-                  <h3 className="text-headline-md font-headline-md text-on-surface group-hover:text-primary transition-colors truncate">
-                    {project.name}
-                  </h3>
-                  <div className="flex items-center gap-3 text-body-md font-body-md text-on-surface-variant">
-                    {project.customer_name && (
-                      <span className="flex items-center gap-1.5">
-                        <span className="material-symbols-outlined text-[16px]">domain</span>
-                        {project.customer_name}
-                      </span>
-                    )}
-                    {project.tender_number && (
-                      <span className="flex items-center gap-1 text-mono-sm font-mono-sm text-secondary">
-                        <span className="material-symbols-outlined text-[16px]">tag</span>
-                        {project.tender_number}
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                <div className="flex flex-col sm:items-end gap-2 shrink-0">
-                  <div className="flex items-center gap-3">
-                    <StatusBadge status={project.status} />
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        router.push(`/projects/${project.id}/products`);
-                      }}
-                      className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-primary/10 px-3 text-label-sm font-label-sm text-primary transition-colors hover:bg-primary/20"
-                      aria-label={`Проверить товары тендера ${project.name}`}
-                      title="Открыть найденные товары и поставщиков"
-                    >
-                      <span className="material-symbols-outlined text-[17px]">travel_explore</span>
-                      <span className="hidden md:inline">Проверить товары</span>
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setEditTarget(project);
-                        setEditDraft({
-                          name: project.name,
-                          customer_name: project.customer_name ?? '',
-                          tender_number: project.tender_number ?? '',
-                          tender_type: project.tender_type ?? '',
-                          complexity: project.complexity ?? '',
-                          status: project.status,
-                          deadline_at: project.deadline_at ?? '',
-                          notes: project.notes ?? '',
-                        });
-                      }}
-                      className="w-8 h-8 flex items-center justify-center rounded-lg text-on-surface-variant hover:text-primary hover:bg-primary/10 transition-colors"
-                      aria-label="Редактировать тендер"
-                      title="Редактировать"
-                    >
-                      <span className="material-symbols-outlined text-[18px]">edit</span>
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setDeleteTarget(project);
-                      }}
-                      className="w-8 h-8 flex items-center justify-center rounded-lg text-on-surface-variant hover:text-error hover:bg-error-container transition-colors"
-                      aria-label="Удалить тендер"
-                      title="Удалить"
-                    >
-                      <span className="material-symbols-outlined text-[18px]">delete</span>
-                    </button>
-                  </div>
-                  <div className="text-mono-sm font-mono-sm text-on-surface-variant flex items-center gap-1">
-                    <span className="material-symbols-outlined text-[14px]">event</span>
-                    Дедлайн: {formatDate(project.deadline_at)}
-                  </div>
-                </div>
-              </div>
-
-              {project.notes && (
-                <p className="mt-3 pt-3 border-t border-outline-variant/60 text-body-md font-body-md text-on-surface-variant">
-                  {project.notes}
-                </p>
-              )}
-            </article>
-          ))}
-
-          {pagination.has_next && (
+          {hasFilters && (
             <button
-              onClick={() => loadProjects(pagination.next_cursor ?? undefined)}
-              className="mx-auto mt-2 px-4 py-2 bg-surface-bright border border-outline-variant rounded-lg text-label-md font-label-md text-on-surface hover:bg-surface-container-low transition-colors"
+              onClick={resetFilters}
+              className="min-h-10 shrink-0 rounded-lg px-2 text-xs font-medium text-primary hover:bg-primary/5"
             >
-              Загрузить ещё
+              Сбросить
             </button>
           )}
         </div>
-      )}
+
+        {notice && (
+          <div
+            role="status"
+            className="flex items-center justify-between gap-3 border-b border-emerald-500/15 bg-emerald-500/5 px-6 py-3 text-sm text-on-surface"
+          >
+            <span className="flex items-center gap-2">
+              <Icon name="check_circle" className="text-lg text-emerald-600" />
+              {notice}
+            </span>
+            <button aria-label="Закрыть уведомление" onClick={() => setNotice('')}>
+              <Icon name="close" className="text-lg" />
+            </button>
+          </div>
+        )}
+        {error && (
+          <div
+            role="alert"
+            className="mx-5 my-4 rounded-xl border border-error/20 bg-error-container p-4 text-sm text-on-error-container"
+          >
+            <p>{error}</p>
+            {lastUpdated && <p className="mt-1">Показаны последние успешно загруженные данные.</p>}
+            <button
+              onClick={() => void loadProjects()}
+              className="mt-2 font-semibold underline underline-offset-2"
+            >
+              Повторить загрузку
+            </button>
+          </div>
+        )}
+
+        <div aria-busy={isLoading || isLoadingMore}>
+          {isLoading ? (
+            <div
+              role="status"
+              aria-label="Загрузка тендеров"
+              className="divide-y divide-outline-variant px-5 sm:px-6"
+            >
+              {[0, 1, 2, 3].map((index) => (
+                <div key={index} className="flex items-center justify-between gap-8 py-6">
+                  <div className="flex-1 space-y-3">
+                    <div className="shimmer h-4 w-2/3 max-w-md rounded" />
+                    <div className="shimmer h-3 w-1/3 rounded" />
+                  </div>
+                  <div className="shimmer h-7 w-20 rounded-full" />
+                </div>
+              ))}
+            </div>
+          ) : projects.length === 0 && !error ? (
+            <div className="flex flex-col items-center px-6 py-14 text-center">
+              <span className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/8 text-primary">
+                <Icon name={hasFilters ? 'search_off' : 'folder_open'} className="text-[28px]" />
+              </span>
+              <h3 className="text-lg font-semibold text-on-surface">
+                {hasFilters ? 'Тендеры не найдены' : 'Ваш портфель начинается здесь'}
+              </h3>
+              <p className="mt-2 max-w-md text-sm leading-relaxed text-on-surface-variant">
+                {hasFilters
+                  ? 'Попробуйте другой запрос или сбросьте фильтр по статусу.'
+                  : 'Создайте первый тендер, чтобы собрать техническое задание, найденные товары и расчёты в одном месте.'}
+              </p>
+              <button
+                onClick={hasFilters ? resetFilters : () => setDialogOpen(true)}
+                className="mt-6 inline-flex min-h-10 items-center gap-2 rounded-xl bg-primary px-4 text-sm font-semibold text-on-primary"
+              >
+                <Icon name={hasFilters ? 'filter_alt_off' : 'add'} className="text-lg" />
+                {hasFilters ? 'Сбросить фильтры' : 'Создать первый тендер'}
+              </button>
+            </div>
+          ) : projects.length > 0 ? (
+            <>
+              <div className="hidden grid-cols-[minmax(220px,2.2fr)_minmax(140px,1fr)_150px_140px_100px] gap-5 border-b border-outline-variant bg-surface-container-low/30 px-6 py-3 text-[10px] font-semibold uppercase tracking-[0.1em] text-on-surface-variant xl:grid">
+                <span>Тендер / заказчик</span>
+                <span>Статус</span>
+                <span>Срок подачи</span>
+                <span>Обновление</span>
+                <span className="text-right">Действия</span>
+              </div>
+              <div className="divide-y divide-outline-variant">
+                {projects.map((project) => {
+                  const deadline = deadlineState(project, now);
+                  return (
+                    <article
+                      key={project.id}
+                      className="group grid gap-4 px-5 py-5 transition hover:bg-primary/[0.025] sm:px-6 xl:grid-cols-[minmax(220px,2.2fr)_minmax(140px,1fr)_150px_140px_100px] xl:items-center xl:gap-5"
+                    >
+                      <div className="flex min-w-0 items-start gap-3">
+                        <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-outline-variant bg-surface-container-low text-primary">
+                          <Icon name="description" className="text-xl" />
+                        </span>
+                        <div className="min-w-0">
+                          <Link
+                            href={`/projects/${project.id}/document`}
+                            className="line-clamp-2 text-sm font-semibold leading-relaxed text-on-surface transition hover:text-primary"
+                          >
+                            {project.name}
+                          </Link>
+                          <p className="mt-1 truncate text-xs text-on-surface-variant">
+                            {project.customer_name || 'Заказчик не указан'}
+                          </p>
+                          {project.tender_number && (
+                            <p className="mt-1 font-mono text-[11px] text-on-surface-variant">
+                              № {project.tender_number}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3 xl:block">
+                        <span className="text-xs text-on-surface-variant xl:hidden">Статус</span>
+                        <StatusBadge status={project.status} />
+                      </div>
+                      <div>
+                        <p
+                          className={`text-xs font-medium ${deadline === 'overdue' ? 'text-error' : deadline === 'soon' ? 'text-amber-600' : 'text-on-surface'}`}
+                        >
+                          {project.deadline_at ? formatDate(project.deadline_at) : 'Срок не указан'}
+                        </p>
+                        {deadline === 'overdue' ? (
+                          <p className="mt-1 text-[11px] text-error">Срок прошёл</p>
+                        ) : deadline === 'soon' ? (
+                          <p className="mt-1 text-[11px] text-amber-600">В ближайшие 7 дней</p>
+                        ) : (
+                          <p className="mt-1 text-[11px] text-on-surface-variant">Срок подачи</p>
+                        )}
+                      </div>
+                      <div className="hidden xl:block">
+                        <p className="text-xs text-on-surface">
+                          {formatDate(project.updated_at || project.created_at)}
+                        </p>
+                        <Link
+                          href={`/projects/${project.id}/products`}
+                          className="mt-1 inline-flex items-center gap-1 text-[11px] font-medium text-primary hover:underline"
+                        >
+                          Товары и цены
+                          <Icon name="north_east" className="text-[12px]" />
+                        </Link>
+                      </div>
+                      <div className="flex items-center gap-1 border-t border-outline-variant/60 pt-3 xl:justify-end xl:border-0 xl:pt-0">
+                        <Link
+                          href={`/projects/${project.id}/products`}
+                          className="mr-auto inline-flex min-h-8 items-center gap-1.5 rounded-lg bg-primary/8 px-3 text-xs font-semibold text-primary hover:bg-primary/15 xl:hidden"
+                        >
+                          <Icon name="inventory_2" className="text-base" />
+                          Товары и цены
+                        </Link>
+                        <button
+                          onClick={() => {
+                            setMutationError('');
+                            setEditTarget(project);
+                            setEditDraft({
+                              ...project,
+                              deadline_at: toLocalInput(project.deadline_at),
+                            });
+                          }}
+                          className="flex h-9 w-9 items-center justify-center rounded-lg text-on-surface-variant transition hover:bg-primary/8 hover:text-primary"
+                          aria-label={`Редактировать тендер ${project.name}`}
+                          title="Редактировать"
+                        >
+                          <Icon name="edit" className="text-lg" />
+                        </button>
+                        <button
+                          onClick={() => {
+                            setMutationError('');
+                            setDeleteTarget(project);
+                          }}
+                          className="flex h-9 w-9 items-center justify-center rounded-lg text-on-surface-variant transition hover:bg-error-container hover:text-error"
+                          aria-label={`Удалить тендер ${project.name}`}
+                          title="Удалить"
+                        >
+                          <Icon name="delete" className="text-lg" />
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </>
+          ) : null}
+        </div>
+
+        {!isLoading && lastUpdated && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-outline-variant bg-surface-container-low/30 px-5 py-4 text-xs text-on-surface-variant sm:px-6">
+            <span role="status">
+              Показано {projects.length}
+              {pagination.has_next ? ' · есть ещё тендеры' : ''}
+              {stats.overdue > 0 ? ` · прошедших сроков: ${stats.overdue}` : ''}
+            </span>
+            {pagination.has_next && pagination.next_cursor ? (
+              <button
+                onClick={() => void loadProjects(pagination.next_cursor!)}
+                disabled={isLoadingMore}
+                className="inline-flex min-h-9 items-center gap-2 rounded-lg border border-outline-variant bg-surface-container-lowest px-3 font-semibold text-on-surface transition hover:border-primary/40 disabled:opacity-50"
+              >
+                <Icon
+                  name={isLoadingMore ? 'progress_activity' : 'expand_more'}
+                  className={`text-base ${isLoadingMore ? 'animate-spin' : ''}`}
+                />
+                {isLoadingMore ? 'Загружаем…' : 'Загрузить ещё'}
+              </button>
+            ) : (
+              <span>
+                Обновлено в{' '}
+                {lastUpdated.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}
+              </span>
+            )}
+          </div>
+        )}
+      </section>
 
       <NewTenderDialog open={dialogOpen} onClose={() => setDialogOpen(false)} />
 
-      {/* Edit dialog */}
       {editTarget && editDraft && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget) {
-              setEditTarget(null);
-              setEditDraft(null);
-            }
-          }}
-        >
-          <div className="w-full max-w-lg bg-surface-bright rounded-lg shadow-xl border border-outline-variant overflow-hidden">
-            <div className="px-6 pt-5 pb-4">
-              <h2 className="text-headline-md font-headline-md text-on-surface mb-1">Редактировать тендер</h2>
-              <p className="text-body-sm font-body-sm text-on-surface-variant">
-                Измените данные и нажмите «Сохранить».
-              </p>
+        <DashboardDialog titleId="edit-tender-title" onClose={closeEdit}>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleSaveEdit();
+            }}
+          >
+            <div className="flex items-start justify-between gap-4 border-b border-outline-variant px-6 py-5">
+              <div>
+                <h2 id="edit-tender-title" className="text-lg font-semibold">
+                  Данные тендера
+                </h2>
+                <p className="mt-1 text-sm text-on-surface-variant">
+                  Актуальные сведения для вашей команды.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeEdit}
+                disabled={isSavingEdit}
+                aria-label="Закрыть редактирование"
+                className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-surface-container disabled:opacity-50"
+              >
+                <Icon name="close" className="text-xl" />
+              </button>
             </div>
-            <div className="px-6 pb-4 space-y-4 max-h-[60vh] overflow-y-auto">
-              <div className="space-y-1.5">
-                <label className="block text-label-md font-label-md text-on-surface-variant">Название *</label>
+            <fieldset disabled={isSavingEdit} className="space-y-4 px-6 py-5 disabled:opacity-60">
+              <div>
+                <label
+                  htmlFor="edit-tender-name"
+                  className="mb-1.5 block text-xs font-semibold text-on-surface-variant"
+                >
+                  Название *
+                </label>
                 <input
-                  className="w-full bg-surface-container-lowest border border-outline-variant rounded-md px-3 py-2 text-body-md font-body-md text-on-surface focus:outline-none focus:border-on-background"
+                  id="edit-tender-name"
+                  required
+                  autoFocus
+                  className={FIELD_CLASS}
                   value={editDraft.name ?? ''}
-                  onChange={(e) => setEditDraft({ ...editDraft, name: e.target.value })}
+                  onChange={(event) => setEditDraft({ ...editDraft, name: event.target.value })}
                 />
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="space-y-1.5">
-                  <label className="block text-label-md font-label-md text-on-surface-variant">Заказчик</label>
-                  <input
-                    className="w-full bg-surface-container-lowest border border-outline-variant rounded-md px-3 py-2 text-body-md font-body-md text-on-surface focus:outline-none focus:border-on-background"
-                    value={editDraft.customer_name ?? ''}
-                    onChange={(e) => setEditDraft({ ...editDraft, customer_name: e.target.value })}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <label className="block text-label-md font-label-md text-on-surface-variant">Номер тендера</label>
-                  <input
-                    className="w-full bg-surface-container-lowest border border-outline-variant rounded-md px-3 py-2 text-body-md font-body-md text-on-surface focus:outline-none focus:border-on-background font-mono-sm font-mono-sm"
-                    value={editDraft.tender_number ?? ''}
-                    onChange={(e) => setEditDraft({ ...editDraft, tender_number: e.target.value })}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <label className="block text-label-md font-label-md text-on-surface-variant">Тип</label>
-                  <input
-                    className="w-full bg-surface-container-lowest border border-outline-variant rounded-md px-3 py-2 text-body-md font-body-md text-on-surface focus:outline-none focus:border-on-background"
-                    placeholder="Например: Госзакупки"
-                    value={editDraft.tender_type ?? ''}
-                    onChange={(e) => setEditDraft({ ...editDraft, tender_type: e.target.value })}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <label className="block text-label-md font-label-md text-on-surface-variant">Сложность</label>
-                  <select
-                    className="w-full bg-surface-container-lowest border border-outline-variant rounded-md px-3 py-2 text-body-md font-body-md text-on-surface focus:outline-none focus:border-on-background"
-                    value={editDraft.complexity ?? ''}
-                    onChange={(e) => setEditDraft({ ...editDraft, complexity: e.target.value })}
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label
+                    htmlFor="edit-customer"
+                    className="mb-1.5 block text-xs font-semibold text-on-surface-variant"
                   >
-                    <option value="">—</option>
+                    Заказчик
+                  </label>
+                  <input
+                    id="edit-customer"
+                    className={FIELD_CLASS}
+                    value={editDraft.customer_name ?? ''}
+                    onChange={(event) =>
+                      setEditDraft({ ...editDraft, customer_name: event.target.value })
+                    }
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="edit-number"
+                    className="mb-1.5 block text-xs font-semibold text-on-surface-variant"
+                  >
+                    Номер тендера
+                  </label>
+                  <input
+                    id="edit-number"
+                    className={FIELD_CLASS}
+                    value={editDraft.tender_number ?? ''}
+                    onChange={(event) =>
+                      setEditDraft({ ...editDraft, tender_number: event.target.value })
+                    }
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="edit-type"
+                    className="mb-1.5 block text-xs font-semibold text-on-surface-variant"
+                  >
+                    Тип закупки
+                  </label>
+                  <input
+                    id="edit-type"
+                    className={FIELD_CLASS}
+                    placeholder="Например, госзакупки"
+                    value={editDraft.tender_type ?? ''}
+                    onChange={(event) =>
+                      setEditDraft({ ...editDraft, tender_type: event.target.value })
+                    }
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="edit-complexity"
+                    className="mb-1.5 block text-xs font-semibold text-on-surface-variant"
+                  >
+                    Сложность
+                  </label>
+                  <select
+                    id="edit-complexity"
+                    className={FIELD_CLASS}
+                    value={editDraft.complexity ?? ''}
+                    onChange={(event) =>
+                      setEditDraft({ ...editDraft, complexity: event.target.value })
+                    }
+                  >
+                    <option value="">Не указана</option>
                     <option value="low">Низкая</option>
                     <option value="medium">Средняя</option>
                     <option value="high">Высокая</option>
                   </select>
                 </div>
-                <div className="space-y-1.5">
-                  <label className="block text-label-md font-label-md text-on-surface-variant">Дедлайн</label>
+                <div>
+                  <label
+                    htmlFor="edit-deadline"
+                    className="mb-1.5 block text-xs font-semibold text-on-surface-variant"
+                  >
+                    Срок подачи
+                  </label>
                   <input
+                    id="edit-deadline"
                     type="datetime-local"
-                    className="w-full bg-surface-container-lowest border border-outline-variant rounded-md px-3 py-2 text-body-md font-body-md text-on-surface focus:outline-none focus:border-on-background"
-                    value={toLocalInput(editDraft.deadline_at)}
-                    onChange={(e) =>
-                      setEditDraft({ ...editDraft, deadline_at: e.target.value ? new Date(e.target.value).toISOString() : '' })
+                    className={FIELD_CLASS}
+                    value={editDraft.deadline_at ?? ''}
+                    onChange={(event) =>
+                      setEditDraft({ ...editDraft, deadline_at: event.target.value })
                     }
                   />
                 </div>
-                <div className="space-y-1.5">
-                  <label className="block text-label-md font-label-md text-on-surface-variant">Статус</label>
-                  <select
-                    className="w-full bg-surface-container-lowest border border-outline-variant rounded-md px-3 py-2 text-body-md font-body-md text-on-surface focus:outline-none focus:border-on-background"
-                    value={editDraft.status ?? 'draft'}
-                    onChange={(e) => setEditDraft({ ...editDraft, status: e.target.value })}
+                <div>
+                  <label
+                    htmlFor="edit-status"
+                    className="mb-1.5 block text-xs font-semibold text-on-surface-variant"
                   >
-                    {STATUS_OPTIONS.filter((s) => s.value !== 'all').map((s) => (
-                      <option key={s.value} value={s.value}>
-                        {s.label}
+                    Статус
+                  </label>
+                  <select
+                    id="edit-status"
+                    className={FIELD_CLASS}
+                    value={editDraft.status ?? 'draft'}
+                    onChange={(event) => setEditDraft({ ...editDraft, status: event.target.value })}
+                  >
+                    {STATUS_OPTIONS.filter((status) => status.value !== 'all').map((status) => (
+                      <option key={status.value} value={status.value}>
+                        {status.label}
                       </option>
                     ))}
                   </select>
                 </div>
               </div>
-              <div className="space-y-1.5">
-                <label className="block text-label-md font-label-md text-on-surface-variant">Заметки</label>
+              <div>
+                <label
+                  htmlFor="edit-notes"
+                  className="mb-1.5 block text-xs font-semibold text-on-surface-variant"
+                >
+                  Заметки
+                </label>
                 <textarea
+                  id="edit-notes"
                   rows={3}
-                  className="w-full bg-surface-container-lowest border border-outline-variant rounded-md px-3 py-2 text-body-md font-body-md text-on-surface focus:outline-none focus:border-on-background resize-none"
+                  className={`${FIELD_CLASS} resize-y`}
                   value={editDraft.notes ?? ''}
-                  onChange={(e) => setEditDraft({ ...editDraft, notes: e.target.value })}
+                  onChange={(event) => setEditDraft({ ...editDraft, notes: event.target.value })}
                 />
               </div>
-            </div>
-            <div className="flex justify-end gap-3 px-6 py-4 bg-surface-container-low border-t border-outline-variant/60">
+            </fieldset>
+            {mutationError && (
+              <p
+                role="alert"
+                className="mx-6 mb-4 rounded-xl bg-error-container p-3 text-sm text-on-error-container"
+              >
+                {mutationError}
+              </p>
+            )}
+            <div className="flex justify-end gap-3 border-t border-outline-variant bg-surface-container-low px-6 py-4">
               <button
-                onClick={() => {
-                  setEditTarget(null);
-                  setEditDraft(null);
-                }}
-                className="px-4 py-2 bg-surface-bright border border-outline-variant rounded-lg text-label-md font-label-md text-on-surface-variant hover:bg-surface-container transition-colors"
+                type="button"
+                onClick={closeEdit}
+                disabled={isSavingEdit}
+                className="rounded-xl border border-outline-variant px-4 py-2.5 text-sm font-medium disabled:opacity-50"
               >
                 Отмена
               </button>
               <button
-                onClick={handleSaveEdit}
+                type="submit"
                 disabled={isSavingEdit}
-                className="px-5 py-2 bg-on-background text-on-primary rounded-lg text-label-md font-label-md hover:opacity-90 disabled:opacity-50 transition-opacity flex items-center gap-2"
+                className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-on-primary disabled:opacity-50"
               >
-                {isSavingEdit && <span className="material-symbols-outlined animate-spin text-[18px]">sync</span>}
-                Сохранить
+                {isSavingEdit && <Icon name="progress_activity" className="animate-spin text-lg" />}
+                {isSavingEdit ? 'Сохраняем…' : 'Сохранить'}
               </button>
             </div>
-          </div>
-        </div>
+          </form>
+        </DashboardDialog>
       )}
 
-      {/* Delete confirmation */}
       {deleteTarget && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget) setDeleteTarget(null);
-          }}
-        >
-          <div className="w-full max-w-md bg-surface-bright rounded-lg shadow-xl border border-outline-variant overflow-hidden">
-            <div className="px-6 pt-5 pb-4">
-              <h2 className="text-headline-md font-headline-md text-on-surface mb-1">Удалить тендер?</h2>
-              <p className="text-body-md font-body-md text-on-surface-variant">
-                Тендер «{deleteTarget.name}» и все связанные данные (ТЗ, анализ, документы) будут удалены безвозвратно.
+        <DashboardDialog titleId="delete-tender-title" onClose={closeDelete}>
+          <div className="px-6 py-6">
+            <span className="mb-4 flex h-11 w-11 items-center justify-center rounded-xl bg-error-container text-error">
+              <Icon name="delete" className="text-[24px]" />
+            </span>
+            <h2 id="delete-tender-title" className="text-lg font-semibold">
+              Удалить тендер?
+            </h2>
+            <p className="mt-2 text-sm leading-relaxed text-on-surface-variant">
+              «{deleteTarget.name}», техническое задание, анализ и связанные документы будут удалены
+              безвозвратно.
+            </p>
+            {mutationError && (
+              <p
+                role="alert"
+                className="mt-4 rounded-xl bg-error-container p-3 text-sm text-on-error-container"
+              >
+                {mutationError}
               </p>
-            </div>
-            <div className="flex justify-end gap-3 px-6 py-4 bg-surface-container-low border-t border-outline-variant/60">
-              <button
-                onClick={() => setDeleteTarget(null)}
-                className="px-4 py-2 bg-surface-bright border border-outline-variant rounded-lg text-label-md font-label-md text-on-surface-variant hover:bg-surface-container transition-colors"
-              >
-                Отмена
-              </button>
-              <button
-                onClick={handleDelete}
-                disabled={isDeleting}
-                className="px-4 py-2 bg-red-600 text-white rounded-lg text-label-md font-label-md hover:bg-red-700 disabled:opacity-50 transition-colors flex items-center gap-2"
-              >
-                {isDeleting && <span className="material-symbols-outlined animate-spin text-[18px]">sync</span>}
-                Удалить навсегда
-              </button>
-            </div>
+            )}
           </div>
-        </div>
+          <div className="flex justify-end gap-3 border-t border-outline-variant bg-surface-container-low px-6 py-4">
+            <button
+              autoFocus
+              onClick={closeDelete}
+              disabled={isDeleting}
+              className="rounded-xl border border-outline-variant px-4 py-2.5 text-sm font-medium disabled:opacity-50"
+            >
+              Отмена
+            </button>
+            <button
+              onClick={() => void handleDelete()}
+              disabled={isDeleting}
+              className="inline-flex items-center gap-2 rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+            >
+              {isDeleting && <Icon name="progress_activity" className="animate-spin text-lg" />}
+              {isDeleting ? 'Удаляем…' : 'Удалить тендер'}
+            </button>
+          </div>
+        </DashboardDialog>
       )}
     </div>
   );

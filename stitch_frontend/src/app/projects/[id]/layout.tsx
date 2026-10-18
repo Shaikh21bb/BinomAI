@@ -22,18 +22,27 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
   const { toggle, theme } = useTheme();
 
   return (
-    <div className="theme-tenderpro min-h-screen flex flex-col text-body-md bg-background w-full overflow-x-clip pb-16 md:pb-0">
+    <div className="workspace-shell theme-tenderpro min-h-screen flex flex-col text-body-md bg-background w-full overflow-x-clip pb-20 md:pb-0">
+      <a href="#workspace-content" className="skip-link">
+        Перейти к содержимому
+      </a>
       <TenderProSidebar />
-      <main className="ml-0 md:ml-[280px] min-h-screen flex flex-col w-full md:w-[calc(100%-280px)]">
+      <main className="ml-0 md:ml-64 min-h-screen min-w-0 flex flex-col w-full md:w-[calc(100%_-_256px)]">
         <Header />
         <ProjectTabs projectId={projectId} />
-        <div className="flex-1 flex flex-col min-h-0">{children}</div>
+        <div
+          id="workspace-content"
+          tabIndex={-1}
+          className="workspace-content flex-1 flex flex-col min-h-0 outline-none"
+        >
+          {children}
+        </div>
       </main>
 
       {/* Mobile bottom navigation */}
       <nav
         aria-label="Мобильная навигация"
-        className="md:hidden fixed bottom-0 inset-x-0 z-50 bg-surface-container-lowest border-t border-outline-variant flex items-center justify-around px-4 py-2"
+        className="mobile-workspace-nav md:hidden fixed bottom-0 inset-x-0 z-50 bg-surface-container-lowest/95 backdrop-blur-xl border-t border-outline-variant flex items-center justify-around px-1 py-2"
       >
         {MOBILE_NAV.map((item) => {
           const href = item.href(projectId);
@@ -42,7 +51,8 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
             <Link
               key={item.label}
               href={href}
-              className={`flex flex-col items-center gap-0.5 px-3 py-1.5 rounded-lg text-label-md font-label-md transition-colors ${
+              aria-current={active ? 'page' : undefined}
+              className={`flex min-w-0 flex-1 flex-col items-center gap-1 px-1 py-1.5 rounded-xl text-[10px] font-medium transition-colors ${
                 active ? 'text-primary font-bold' : 'text-on-surface-variant'
               }`}
             >
@@ -54,7 +64,7 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
         <button
           onClick={toggle}
           aria-label="Переключить тему"
-          className="flex flex-col items-center gap-0.5 px-3 py-1.5 rounded-lg text-label-md font-label-md text-on-surface-variant transition-colors"
+          className="flex min-w-0 flex-1 flex-col items-center gap-1 px-1 py-1.5 rounded-xl text-[10px] font-medium text-on-surface-variant transition-colors"
         >
           <span className="material-symbols-outlined text-[22px]">
             {theme === 'dark' ? 'light_mode' : 'dark_mode'}

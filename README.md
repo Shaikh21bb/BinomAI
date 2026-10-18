@@ -15,7 +15,7 @@
 **Казахстан • Строительство • AI**
 
 [![Status](https://img.shields.io/badge/Status-Production-success?style=for-the-badge)](https://binom-ai-vprod.vercel.app)
-[![Release](https://img.shields.io/badge/Release-v1.4.0-blue?style=for-the-badge)](https://github.com/Shaikh21bb/BinomAI/releases)
+[![Release](https://img.shields.io/badge/Release-v1.5.0-blue?style=for-the-badge)](https://github.com/Shaikh21bb/BinomAI/releases)
 [![Market](https://img.shields.io/badge/Market-Kazakhstan-green?style=for-the-badge)](/)
 [![Stack](https://img.shields.io/badge/Stack-Next.js%20%7C%20FastAPI%20%7C%20Supabase%20%7C%20AI-purple?style=for-the-badge)](/)
 
@@ -42,7 +42,9 @@
 - ✉️ **Создаёт** Сопроводительное письмо
 - 📥 **Экспортирует** финальные документы в DOCX / PDF
 
-Отдельный сценарий **Quick Check** извлекает позиции из PDF, ищет публичные предложения поставщиков, сопоставляет характеристики и остатки, сохраняет приватную историю проверок и позволяет повторить поиск без повторной загрузки документа.
+Отдельный сценарий **Quick Check** извлекает позиции из PDF и Word (.docx), ищет публичные предложения поставщиков, сопоставляет характеристики и остатки, сохраняет приватную историю проверок и позволяет повторить поиск без повторной загрузки документа.
+
+В версии **1.5.0** обновлены рабочий стол, основная и мобильная навигация, вход и быстрые проверки. Добавлены серверный поиск, актуальные состояния загрузки и ошибок, доступные модальные окна и синхронизация темы. Обновление сессии объединяет параллельные запросы, поддерживает ротацию refresh-токена и сохраняет вход при временных сбоях провайдера. Границы проверок описаны в [Enterprise Workspace QA](docs/05_Development/Enterprise%20Workspace%20QA.md).
 
 ---
 

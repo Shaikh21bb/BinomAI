@@ -106,14 +106,43 @@ function isWordDocument(filename: string) {
   return filename.toLowerCase().endsWith('.docx');
 }
 
+const MAX_DOCUMENT_BYTES = 20 * 1024 * 1024;
+
+function validateDocument(file: File) {
+  const name = file.name.toLowerCase();
+  if (name.endsWith('.doc')) return 'Сохраните Word-документ в формате .docx и загрузите его снова. Старый формат .doc не поддерживается.';
+  if (!name.endsWith('.pdf') && !name.endsWith('.docx')) return 'Выберите документ PDF или Word (.docx). Другие форматы пока не поддерживаются.';
+  if (!file.size) return 'Этот файл пустой. Выберите документ с технической спецификацией.';
+  if (file.size > MAX_DOCUMENT_BYTES) return 'Документ больше 20 МБ. Уменьшите размер файла или разделите его на несколько документов.';
+  return '';
+}
+
+function formatFileSize(bytes: number) {
+  return bytes < 1024 * 1024
+    ? `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 0 }).format(bytes / 1024)} КБ`
+    : `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 }).format(bytes / (1024 * 1024))} МБ`;
+}
+
+function reportStatus(state: ParsedPdf['processing_state']) {
+  if (state === 'queued') return 'В очереди';
+  if (state === 'running') return 'Идёт поиск';
+  if (state === 'error') return 'Нужен повторный запуск';
+  if (state === 'completed') return 'Проверка завершена';
+  return 'Ожидает проверки';
+}
+
+type ResultFilter = 'all' | 'with-cards' | 'without-cards' | 'error';
+
 export default function QuickCheckPage() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const resultsRef = useRef<HTMLElement>(null);
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [phase, setPhase] = useState<'idle' | 'parsing' | 'searching' | 'done'>('idle');
   const [parsed, setParsed] = useState<ParsedPdf | null>(null);
   const [reusedReport, setReusedReport] = useState(false);
   const [rerunningReport, setRerunningReport] = useState(false);
+  const [runningReport, setRunningReport] = useState(false);
   const [items, setItems] = useState<CheckItem[]>([]);
   const [error, setError] = useState('');
   const [history, setHistory] = useState<SavedCheck[]>([]);
@@ -123,13 +152,29 @@ export default function QuickCheckPage() {
   const [historyError, setHistoryError] = useState('');
   const [loadingReport, setLoadingReport] = useState(false);
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
-  const busy = rerunningReport || phase === 'parsing' || (phase === 'searching' && !['queued', 'running'].includes(parsed?.processing_state ?? ''));
+  const [openingReportId, setOpeningReportId] = useState<string | null>(null);
+  const [historyQuery, setHistoryQuery] = useState('');
+  const [resultFilter, setResultFilter] = useState<ResultFilter>('all');
+  const [pollError, setPollError] = useState(false);
+  const [lastPollAt, setLastPollAt] = useState(() => Date.now());
+  const busy = rerunningReport || runningReport || phase === 'parsing' || (phase === 'searching' && !['queued', 'running'].includes(parsed?.processing_state ?? ''));
   const completed = items.filter((item) => item.state === 'ready').length;
   const activeReportId = parsed?.id;
   const activeReportState = parsed?.processing_state;
   const activeSearch = ['queued', 'running'].includes(activeReportState ?? '');
   const lastProgress = Date.parse(parsed?.updated_at ?? '');
-  const staleSearch = activeSearch && Number.isFinite(lastProgress) && Date.now() - lastProgress > 10 * 60 * 1000;
+  const staleSearch = activeSearch && Number.isFinite(lastProgress) && Math.max(lastPollAt, lastProgress) - lastProgress > 10 * 60 * 1000;
+  const failed = items.filter((item) => item.state === 'error').length;
+  const progress = items.length ? Math.round(((completed + failed) / items.length) * 100) : 0;
+  const matchedItems = items.filter((item) => item.results.some(isVerifiedProductLead)).length;
+  const withoutCards = items.filter((item) => item.state === 'ready' && !item.results.some(isVerifiedProductLead)).length;
+  const filteredHistory = history.filter((report) => report.filename.toLocaleLowerCase('ru-RU').includes(historyQuery.trim().toLocaleLowerCase('ru-RU')));
+  const visibleItems = items.map((item, index) => ({ item, index })).filter(({ item }) => {
+    if (resultFilter === 'with-cards') return item.results.some(isVerifiedProductLead);
+    if (resultFilter === 'without-cards') return item.state === 'ready' && !item.results.some(isVerifiedProductLead);
+    if (resultFilter === 'error') return item.state === 'error';
+    return true;
+  });
 
   async function refreshHistory() {
     setLoadingHistory(true);
@@ -172,12 +217,15 @@ export default function QuickCheckPage() {
     let cancelled = false;
     let fetching = false;
     let polls = 0;
+    let failures = 0;
     async function poll() {
       if (fetching) return;
       fetching = true;
       try {
         const report: ParsedPdf = await api.get(`/quick-check/reports/${activeReportId}`);
         if (cancelled) return;
+        failures = 0;
+        setPollError(false);
         setParsed(report);
         setItems(report.items.map((item) => ({ ...item, results: item.results ?? [] })));
         polls += 1;
@@ -188,8 +236,11 @@ export default function QuickCheckPage() {
         }
       } catch {
         // A temporary connection failure must not stop server-side processing.
+        failures += 1;
+        if (!cancelled && failures >= 2) setPollError(true);
       } finally {
         fetching = false;
+        if (!cancelled) setLastPollAt(Date.now());
       }
     }
     void poll();
@@ -200,17 +251,23 @@ export default function QuickCheckPage() {
   async function openReport(id: string) {
     if (busy || loadingReport || deletingReportId) return;
     setLoadingReport(true);
+    setOpeningReportId(id);
     setError('');
+    setHistoryError('');
     try {
       const document: ParsedPdf = await api.get(`/quick-check/reports/${id}`);
       setParsed(document);
       setReusedReport(false);
+      setResultFilter('all');
+      setPollError(false);
       setItems(document.items.map((item) => ({ ...item, results: item.results ?? [] })));
       setPhase(['queued', 'running'].includes(document.processing_state) ? 'searching' : 'done');
+      window.requestAnimationFrame(() => resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
     } catch (loadError) {
-      setError(errorMessage(loadError, 'Не удалось открыть проверку'));
+      setHistoryError(errorMessage(loadError, 'Не удалось открыть проверку. Попробуйте ещё раз.'));
     } finally {
       setLoadingReport(false);
+      setOpeningReportId(null);
     }
   }
 
@@ -237,13 +294,32 @@ export default function QuickCheckPage() {
 
   function chooseFile(next: File | null) {
     if (!next || busy) return;
+    const validationError = validateDocument(next);
+    if (validationError) {
+      setError(validationError);
+      setFile(null);
+      if (inputRef.current) inputRef.current.value = '';
+      return;
+    }
     setError('');
     setFile(next);
+  }
+
+  function clearFile() {
+    if (busy) return;
+    setFile(null);
+    setError('');
+    if (inputRef.current) inputRef.current.value = '';
   }
 
   function onDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
     setDragging(false);
+    if (busy) return;
+    if (event.dataTransfer.files.length > 1) {
+      setError('Загрузите один документ за раз. Остальные можно проверить отдельно.');
+      return;
+    }
     chooseFile(event.dataTransfer.files[0] || null);
   }
 
@@ -284,6 +360,7 @@ export default function QuickCheckPage() {
 
   async function checkRemaining(report: ParsedPdf) {
     if (busy || (['queued', 'running'].includes(report.processing_state) && !staleSearch)) return;
+    setRunningReport(true);
     setError('');
     try {
       const updated: ParsedPdf = await api.post(`/quick-check/reports/${report.id}/run`, {});
@@ -294,12 +371,15 @@ export default function QuickCheckPage() {
       await refreshHistory();
     } catch (runError) {
       setError(errorMessage(runError, 'Не удалось запустить проверку'));
+    } finally {
+      setRunningReport(false);
     }
   }
 
   async function rerunReport(report: ParsedPdf) {
     if (busy || ['queued', 'running'].includes(report.processing_state)) return;
     setRerunningReport(true);
+    setResultFilter('all');
     setError('');
     try {
       const updated: ParsedPdf = await api.post(`/quick-check/reports/${report.id}/rerun`, {});
@@ -319,23 +399,17 @@ export default function QuickCheckPage() {
   async function start(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!file || busy) return;
-    const lowerName = file.name.toLowerCase();
-    if (lowerName.endsWith('.doc')) {
-      setError('Старый формат .doc не поддерживается. Сохраните документ как .docx и загрузите снова.');
-      return;
-    }
-    if (!lowerName.endsWith('.pdf') && !lowerName.endsWith('.docx')) {
-      setError('Выберите техническую спецификацию в формате PDF или DOCX.');
-      return;
-    }
-    if (file.size > 20 * 1024 * 1024) {
-      setError('Максимальный размер документа — 20 МБ.');
+    const validationError = validateDocument(file);
+    if (validationError) {
+      setError(validationError);
       return;
     }
 
     setError('');
     setParsed(null);
     setReusedReport(false);
+    setResultFilter('all');
+    setPollError(false);
     setItems([]);
     setPhase('parsing');
     try {
@@ -346,6 +420,7 @@ export default function QuickCheckPage() {
       setReusedReport(Boolean(document.reused));
       setItems(document.items.map((item) => ({ ...item, results: item.results ?? [] })));
       setPhase(['queued', 'running'].includes(document.processing_state) ? 'searching' : 'done');
+      window.requestAnimationFrame(() => resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
       if (document.processing_state === 'error') setError('Результат сохранён, но фоновый поиск пока недоступен. Запустите его из сохранённой проверки.');
       await refreshHistory();
     } catch (uploadError) {
@@ -367,102 +442,90 @@ export default function QuickCheckPage() {
   return (
     <AppShell>
       <div className="mx-auto flex w-full max-w-container-max flex-1 flex-col gap-6 p-4 md:p-margin-page">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <Link href="/dashboard" className="mb-3 inline-flex items-center gap-1 text-label-sm text-on-surface-variant hover:text-primary">
-              <span className="material-symbols-outlined text-[16px]">arrow_back</span>Рабочий стол
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="max-w-3xl">
+            <Link href="/dashboard" className="mb-4 inline-flex items-center gap-1.5 text-label-sm text-on-surface-variant transition-colors hover:text-primary">
+              <span aria-hidden="true" className="material-symbols-outlined text-[16px]">arrow_back</span>Рабочий стол
             </Link>
-            <h1 className="text-display font-display tracking-tight text-on-surface">Быстрая проверка товаров</h1>
-            <p className="mt-2 max-w-2xl text-body-lg text-on-surface-variant">Загрузите техспецификацию в PDF или Word (.docx). Мы выделим товары, найдём их фото и проверим опубликованные характеристики — без создания тендера. Повторная загрузка того же файла откроет сохранённый результат сразу.</p>
+            <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-primary">Аналитика закупок</p>
+            <h1 className="font-display text-[clamp(1.75rem,3.2vw,2.5rem)] leading-tight font-bold tracking-[-0.04em] text-on-surface">От документа к поставщику</h1>
+            <p className="mt-3 max-w-2xl text-body-lg text-on-surface-variant">Проверьте товары из технической спецификации. Получите карточки, контакты продавцов и сравнение характеристик в одном отчёте.</p>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1.5 text-label-sm text-primary"><span className="material-symbols-outlined text-[17px]">bolt</span>Отдельная проверка</span>
-            <a href="#quick-check-history" className="inline-flex items-center gap-1.5 rounded-full border border-outline-variant px-3 py-1.5 text-label-sm text-on-surface hover:border-primary hover:text-primary"><span className="material-symbols-outlined text-[17px]">history</span>История · {historyStats.total_reports}</a>
-          </div>
+          <a href="#quick-check-history" className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-outline-variant bg-surface-container-lowest px-4 py-2 text-label-md text-on-surface transition-colors hover:border-primary hover:text-primary"><span aria-hidden="true" className="material-symbols-outlined text-[18px]">history</span>История проверок<span className="rounded bg-surface-container px-1.5 py-0.5 text-label-sm">{!history.length && (loadingHistory || historyError) ? '—' : historyStats.total_reports}</span></a>
         </div>
 
-        <form onSubmit={(event) => void start(event)} className="rounded-2xl border border-outline-variant bg-surface-container-lowest p-5 shadow-sm md:p-7">
-          <div
-            onDragOver={(event) => { event.preventDefault(); if (!busy) setDragging(true); }}
-            onDragLeave={() => setDragging(false)}
-            onDrop={onDrop}
-            className={`flex flex-col items-center gap-3 rounded-xl border-2 border-dashed px-4 py-8 text-center transition-colors ${dragging ? 'border-primary bg-primary/5' : 'border-outline-variant bg-surface-container-low'}`}
-          >
-            <span className="material-symbols-outlined rounded-full bg-primary/10 p-3 text-[32px] text-primary">description</span>
-            <div>
-              <p className="text-title-md font-title-md text-on-surface">{file ? file.name : 'Перетащите PDF или DOCX сюда'}</p>
-              <p className="mt-1 text-body-sm text-on-surface-variant">PDF, скан или Word (.docx) до 20 МБ · для скана до 12 страниц · исходный файл не хранится, сохраняется только результат проверки</p>
+        <form onSubmit={(event) => void start(event)} aria-busy={phase === 'parsing'} className="overflow-hidden rounded-2xl border border-outline-variant bg-surface-container-lowest shadow-sm">
+          <div className="grid lg:grid-cols-[minmax(0,1fr)_280px] xl:grid-cols-[minmax(0,1fr)_320px]">
+            <div className="p-5 md:p-7">
+              <div className="mb-5 flex items-center gap-3">
+                <span className="flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary"><span aria-hidden="true" className="material-symbols-outlined text-[21px]">upload_file</span></span>
+                <div><h2 className="text-title-lg font-semibold text-on-surface">Новая быстрая проверка</h2><p className="mt-0.5 text-body-sm text-on-surface-variant">Тендер создавать не нужно</p></div>
+              </div>
+              <div
+                onDragOver={(event) => { event.preventDefault(); if (!busy) setDragging(true); }}
+                onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}
+                onDrop={onDrop}
+                className={`relative flex min-h-48 flex-col items-center justify-center gap-4 rounded-xl border border-dashed px-5 py-7 text-center transition-colors ${dragging ? 'border-primary bg-primary/10' : file ? 'border-primary/40 bg-primary/5' : 'border-outline bg-surface-container-low/60 hover:border-primary/60'}`}
+              >
+                <span aria-hidden="true" className={`material-symbols-outlined text-[34px] ${file ? 'text-primary' : 'text-on-surface-variant'}`}>{file ? 'task_alt' : 'cloud_upload'}</span>
+                <div className="min-w-0 max-w-full">
+                  <p className="break-words text-body-md font-semibold text-on-surface">{file ? file.name : dragging ? 'Отпустите документ здесь' : 'Перетащите техническую спецификацию'}</p>
+                  <p id="quick-check-file-help" className="mt-1.5 text-body-sm text-on-surface-variant">{file ? `${isWordDocument(file.name) ? 'Word · DOCX' : 'PDF'} · ${formatFileSize(file.size)} · готов к проверке` : 'PDF или Word (.docx) · до 20 МБ'}</p>
+                </div>
+                <input ref={inputRef} aria-label="Выбрать техническую спецификацию" aria-describedby="quick-check-file-help" type="file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" className="hidden" disabled={busy} onChange={(event) => chooseFile(event.target.files?.[0] || null)} />
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <button type="button" disabled={busy} onClick={() => inputRef.current?.click()} className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-outline-variant bg-surface-container-lowest px-4 py-2 text-label-md text-on-surface transition-colors hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-50"><span aria-hidden="true" className="material-symbols-outlined text-[17px]">{file ? 'swap_horiz' : 'folder_open'}</span>{file ? 'Заменить файл' : 'Выбрать файл'}</button>
+                  {file && <button type="button" disabled={busy} onClick={clearFile} aria-label={`Убрать файл ${file.name}`} className="flex size-10 items-center justify-center rounded-lg text-on-surface-variant transition-colors hover:bg-error-container hover:text-on-error-container disabled:opacity-50"><span aria-hidden="true" className="material-symbols-outlined text-[20px]">close</span></button>}
+                </div>
+              </div>
+              {error && <div role="alert" className="mt-4 flex items-start gap-2.5 rounded-lg bg-error-container px-4 py-3 text-body-sm text-on-error-container"><span aria-hidden="true" className="material-symbols-outlined mt-0.5 text-[18px]">error</span><p>{error}</p></div>}
+              <div className="mt-5 flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <p className="flex max-w-sm items-start gap-2 text-label-sm text-on-surface-variant"><span aria-hidden="true" className="material-symbols-outlined text-[16px]">lock</span>Исходный файл не хранится. Результат доступен только вам.</p>
+                <button type="submit" disabled={!file || busy} className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg bg-primary px-5 py-2.5 text-label-md font-semibold text-on-primary shadow-sm transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-45">
+                  <span aria-hidden="true" className={`material-symbols-outlined text-[19px] ${busy ? 'animate-spin' : ''}`}>{busy ? 'progress_activity' : 'arrow_forward'}</span>
+                  {phase === 'parsing' ? 'Читаем документ…' : 'Запустить проверку'}
+                </button>
+              </div>
             </div>
-            <input ref={inputRef} type="file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" className="hidden" disabled={busy} onChange={(event) => chooseFile(event.target.files?.[0] || null)} />
-            <button type="button" disabled={busy} onClick={() => inputRef.current?.click()} className="rounded-lg border border-outline-variant bg-surface-container-lowest px-4 py-2 text-label-md text-on-surface hover:border-primary disabled:opacity-50">Выбрать файл</button>
+            <aside className="border-t border-outline-variant bg-surface-container-low/70 p-5 md:p-7 lg:border-t-0 lg:border-l" aria-label="Этапы проверки">
+              <h3 className="text-label-md font-semibold text-on-surface">Что будет в отчёте</h3>
+              <ol className="mt-5 space-y-5">
+                {[
+                  { icon: 'description', title: 'Позиции из документа', text: 'Названия, количество и требования из ТЗ.' },
+                  { icon: 'travel_explore', title: 'Товары и продавцы', text: 'Фото, ссылки и опубликованные контакты.' },
+                  { icon: 'fact_check', title: 'Сверка характеристик', text: 'Подтверждения и расхождения с источниками.' },
+                ].map((step, index) => <li key={step.title} className="flex items-start gap-3"><span aria-hidden="true" className="material-symbols-outlined mt-0.5 text-[20px] text-primary">{step.icon}</span><div><p className="text-body-sm font-semibold text-on-surface"><span className="mr-1 text-on-surface-variant">0{index + 1}.</span> {step.title}</p><p className="mt-1 text-body-sm text-on-surface-variant">{step.text}</p></div></li>)}
+              </ol>
+              <p className="mt-6 border-t border-outline-variant pt-4 text-label-sm text-on-surface-variant">Сканы: до 12 страниц. Обрабатываем до 20 позиций за проверку. Повторный файл откроет сохранённый отчёт.</p>
+            </aside>
           </div>
-          <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-            <p className="max-w-xl text-body-sm text-on-surface-variant">Точное наличие в штуках покажем, если продавец его указал. Статус «в наличии» без числа не считаем подтверждённым остатком.</p>
-            <button type="submit" disabled={!file || busy} className="inline-flex items-center gap-2 rounded-lg bg-on-background px-5 py-2.5 text-label-md font-label-md text-on-primary shadow-sm hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50">
-              <span className={`material-symbols-outlined text-[19px] ${busy ? 'animate-spin' : ''}`}>{busy ? 'sync' : 'travel_explore'}</span>
-              {phase === 'parsing' ? 'Читаем документ…' : 'Проверить документ'}
-            </button>
-          </div>
-          {error && <p role="alert" className="mt-4 rounded-lg bg-error-container px-4 py-3 text-body-sm text-on-error-container">{error}</p>}
         </form>
 
-        <section id="quick-check-history" className="scroll-mt-6 rounded-2xl border border-outline-variant bg-surface-container-lowest p-5 shadow-sm md:p-6" aria-label="История проверок">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="text-title-lg font-title-lg text-on-surface">История всех проверок</h2>
-              <p className="mt-1 text-body-sm text-on-surface-variant">Результаты хранятся в базе и доступны только вам. Исходные файлы не сохраняются.</p>
-            </div>
-            <button type="button" disabled={loadingHistory} onClick={() => void refreshHistory()} className="inline-flex items-center gap-1 text-label-sm text-primary hover:underline disabled:opacity-50"><span className="material-symbols-outlined text-[17px]">refresh</span>Обновить</button>
-          </div>
-          <div className="mt-4 grid gap-2 sm:grid-cols-3">
-            {[
-              { label: 'Всего проверок', value: historyStats.total_reports, icon: 'history' },
-              { label: 'Найдено позиций', value: historyStats.total_items, icon: 'inventory_2' },
-              { label: 'Товаров проверено', value: historyStats.checked_items, icon: 'task_alt' },
-            ].map((stat) => (
-              <div key={stat.label} className="rounded-xl bg-surface-container-low p-3">
-                <span className="flex items-center gap-2 text-label-sm text-on-surface-variant"><span className="material-symbols-outlined text-[17px] text-primary">{stat.icon}</span>{stat.label}</span>
-                <span className="mt-1 block text-title-lg font-title-lg text-on-surface">{stat.value}</span>
-              </div>
-            ))}
-          </div>
-          {historyError && <p role="alert" className="mt-3 text-body-sm text-error">{historyError}</p>}
-          {history.length ? (
-            <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-              {history.map((report) => (
-                <div key={report.id} className={`flex items-stretch overflow-hidden rounded-xl border transition-colors hover:border-primary ${parsed?.id === report.id ? 'border-primary bg-primary/5' : 'border-outline-variant bg-surface-container-low'}`}>
-                  <button type="button" disabled={busy || loadingReport || Boolean(deletingReportId)} onClick={() => void openReport(report.id)} className="min-w-0 flex-1 p-3 text-left disabled:opacity-50">
-                    <span className="block truncate text-label-md font-label-md text-on-surface">{report.filename}</span>
-                    <span className="mt-1 block text-label-sm text-on-surface-variant">{formatDate(report.created_at)} · проверено {report.checked_items} из {report.total_items}</span>
-                    {['queued', 'running'].includes(report.processing_state) && <span className="mt-1 block text-label-sm text-primary">Проверяется в фоне</span>}
-                    {report.processing_state === 'error' && <span className="mt-1 block text-label-sm text-error">Нужен повторный запуск</span>}
-                  </button>
-                  <button type="button" aria-label={`Удалить проверку ${report.filename}`} disabled={busy || loadingReport || Boolean(deletingReportId)} onClick={() => void deleteReport(report)} className="border-l border-outline-variant px-3 text-on-surface-variant hover:bg-error-container hover:text-on-error-container disabled:opacity-50">
-                    <span className={`material-symbols-outlined text-[19px] ${deletingReportId === report.id ? 'animate-spin' : ''}`}>{deletingReportId === report.id ? 'progress_activity' : 'delete'}</span>
-                  </button>
-                </div>
-              ))}
-            </div>
-          ) : !historyError && !loadingHistory && <p className="mt-4 text-body-sm text-on-surface-variant">Пока нет сохранённых проверок. Проверки, сделанные до появления истории, не сохранялись; новые появятся здесь сразу после загрузки документа.</p>}
-          {nextHistoryCursor && <button type="button" disabled={loadingHistory} onClick={() => void loadMoreHistory()} className="mt-4 w-full rounded-lg border border-outline-variant px-4 py-2 text-label-md text-on-surface hover:border-primary disabled:opacity-50">{loadingHistory ? 'Загружаем…' : 'Показать предыдущие проверки'}</button>}
-        </section>
+        {phase === 'parsing' && <div role="status" className="flex items-center gap-4 rounded-xl border border-primary/20 bg-primary/5 p-5"><span aria-hidden="true" className="material-symbols-outlined animate-spin text-[25px] text-primary">progress_activity</span><div><p className="text-body-md font-semibold text-on-surface">Читаем техническую спецификацию</p><p className="mt-1 text-body-sm text-on-surface-variant">Выделяем товары, количество и требования. Распознавание скана может занять больше времени.</p></div></div>}
 
         {parsed && (
-          <section className="space-y-4">
+          <section ref={resultsRef} className="scroll-mt-6 space-y-4" aria-label="Результаты проверки">
             <div className="flex flex-wrap items-end justify-between gap-2">
               <div>
+                <p className="mb-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-primary">Отчёт по документу</p>
                 <h2 className="text-headline-lg font-headline-lg text-on-surface">Результаты проверки</h2>
-                <p className="mt-1 text-body-sm text-on-surface-variant">{parsed.filename} · {isWordDocument(parsed.filename) ? 'DOCX' : `${parsed.page_count} стр.`} · {parsed.total_items} позиций</p>
+                <p className="mt-1 max-w-2xl break-words text-body-sm text-on-surface-variant">{parsed.filename} · {isWordDocument(parsed.filename) ? 'DOCX' : `${parsed.page_count} стр.`} · позиций: {parsed.total_items}</p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <span aria-live="polite" className="rounded-full bg-primary/10 px-3 py-1.5 text-label-sm text-primary">Проверено {completed} из {items.length}</span>
                 {items.some((item) => item.state !== 'ready') && (!activeSearch || staleSearch) && <button type="button" disabled={busy} onClick={() => void checkRemaining(parsed)} className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-label-sm text-on-primary hover:opacity-90 disabled:opacity-50"><span className="material-symbols-outlined text-[17px]">travel_explore</span>{staleSearch ? 'Возобновить проверку' : 'Проверить оставшиеся'}</button>}
                 {!activeSearch && <button type="button" disabled={busy} onClick={() => void rerunReport(parsed)} className="inline-flex items-center gap-1.5 rounded-lg border border-primary px-3 py-1.5 text-label-sm text-primary hover:bg-primary/5 disabled:opacity-50"><span className="material-symbols-outlined text-[17px]">refresh</span>{rerunningReport ? 'Запускаем…' : 'Проверить заново'}</button>}
-                <button type="button" onClick={() => downloadReport(parsed, items)} className="inline-flex items-center gap-1.5 rounded-lg border border-outline-variant px-3 py-1.5 text-label-sm text-on-surface hover:border-primary"><span className="material-symbols-outlined text-[17px]">download</span>Скачать отчёт CSV</button>
+                <button type="button" disabled={!items.length} onClick={() => downloadReport(parsed, items)} className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-outline-variant bg-surface-container-lowest px-3 py-2 text-label-sm text-on-surface hover:border-primary disabled:opacity-50"><span aria-hidden="true" className="material-symbols-outlined text-[17px]">download</span>Скачать CSV</button>
               </div>
             </div>
             {reusedReport && <p role="status" className="rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-body-sm text-on-surface">Этот документ уже есть в истории: открыта проверка от {formatDate(parsed.created_at)} без повторной обработки файла. {activeSearch ? 'Поиск ещё идёт в фоне.' : 'Для свежих данных нажмите «Проверить заново» — предыдущий результат останется в истории.'}</p>}
-            {activeSearch && !staleSearch && <p role="status" className="rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-body-sm text-on-surface">Поиск идёт в фоне. Можно закрыть страницу: готовые товары сохраняются, а прогресс виден здесь и в истории.</p>}
+            <div className="rounded-xl border border-outline-variant bg-surface-container-lowest p-4 md:p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3"><span aria-hidden="true" className={`material-symbols-outlined text-[23px] ${activeSearch ? 'animate-spin text-primary' : failed ? 'text-error' : 'text-primary'}`}>{activeSearch ? 'progress_activity' : failed ? 'error' : 'task_alt'}</span><div><p aria-live="polite" className="text-body-md font-semibold text-on-surface">{activeSearch ? parsed.processing_state === 'queued' ? 'Документ в очереди на поиск' : 'Ищем товары и сверяем требования' : failed ? 'Проверка требует внимания' : completed === items.length ? 'Проверка завершена' : 'Проверка готова к запуску'}</p><p className="mt-1 text-body-sm text-on-surface-variant">Проверено {completed} из {items.length}{failed ? ` · с ошибкой: ${failed}` : ''}{activeSearch ? '. Прогресс сохраняется, страницу можно закрыть.' : ` · позиций с карточками: ${matchedItems}`}</p></div></div>
+                <span className="font-mono-sm text-[20px] font-semibold tabular-nums text-on-surface">{progress}%</span>
+              </div>
+              <div role="progressbar" aria-label="Обработка позиций документа" aria-valuemin={0} aria-valuemax={items.length || 1} aria-valuenow={completed + failed} aria-valuetext={`Проверено ${completed} из ${items.length}${failed ? `, с ошибкой ${failed}` : ''}`} className="mt-4 h-1.5 overflow-hidden rounded-full bg-surface-container-high"><div className={`h-full rounded-full transition-[width] duration-500 ${failed ? 'bg-error' : 'bg-primary'}`} style={{ width: `${progress}%` }} /></div>
+              {pollError && <p role="status" className="mt-3 flex items-center gap-2 text-body-sm text-on-surface-variant"><span aria-hidden="true" className="material-symbols-outlined text-[17px]">cloud_off</span>Не удаётся обновить прогресс. Повторяем запрос автоматически; сохранённые результаты доступны в истории.</p>}
+            </div>
             {staleSearch && <p role="status" className="rounded-xl bg-amber-50 px-4 py-3 text-body-sm text-amber-900">Прогресс давно не обновлялся. Нажмите «Возобновить проверку», чтобы продолжить с сохранённого места.</p>}
             {parsed.processing_state === 'error' && <p role="alert" className="rounded-xl bg-error-container px-4 py-3 text-body-sm text-on-error-container">Поиск прервался. Уже найденные товары сохранены; нажмите «Проверить оставшиеся», чтобы продолжить.</p>}
             {parsed.truncated && <p className="rounded-lg bg-amber-50 p-3 text-body-sm text-amber-900">Для быстрой проверки взяты первые 20 позиций документа.</p>}
@@ -480,14 +543,23 @@ export default function QuickCheckPage() {
                 </div>
               ))}
             </div>
-            <p className="text-label-sm text-on-surface-variant">Наличие и соответствие характеристикам — разные проверки. Даже достаточный остаток не означает полного соответствия ТЗ.</p>
-            {items.map((item, index) => (
+            <p className="flex items-start gap-2 text-label-sm text-on-surface-variant"><span aria-hidden="true" className="material-symbols-outlined text-[16px]">info</span>Остаток учитываем только по опубликованному количеству. Соответствие ТЗ оценивается отдельно — проверьте доказательства перед закупкой.</p>
+            <div className="flex flex-wrap items-center gap-2 border-b border-outline-variant pb-4" aria-label="Фильтр позиций">
+              {([
+                { id: 'all', label: 'Все позиции', count: items.length },
+                { id: 'with-cards', label: 'С карточками', count: matchedItems },
+                { id: 'without-cards', label: 'Без карточек', count: withoutCards },
+                { id: 'error', label: 'Ошибки', count: failed },
+              ] as const).map((filter) => <button key={filter.id} type="button" aria-pressed={resultFilter === filter.id} onClick={() => setResultFilter(filter.id)} className={`inline-flex min-h-10 items-center gap-2 rounded-lg px-3 py-2 text-label-sm transition-colors ${resultFilter === filter.id ? 'bg-primary text-on-primary' : 'bg-surface-container-lowest text-on-surface-variant hover:bg-surface-container'}`}>{filter.label}<span className={`rounded px-1.5 py-0.5 tabular-nums ${resultFilter === filter.id ? 'bg-on-primary/15' : 'bg-surface-container'}`}>{filter.count}</span></button>)}
+            </div>
+            {!visibleItems.length && <div className="rounded-xl border border-dashed border-outline-variant bg-surface-container-lowest px-5 py-10 text-center"><span aria-hidden="true" className="material-symbols-outlined text-[30px] text-on-surface-variant">filter_list_off</span><p className="mt-2 text-body-md font-semibold text-on-surface">{items.length ? 'В этом разделе пока нет позиций' : 'В документе не найдены позиции товаров'}</p><p className="mx-auto mt-1 max-w-md text-body-sm text-on-surface-variant">{items.length ? activeSearch ? 'Поиск продолжается. Новые результаты появятся автоматически.' : 'Выберите другой фильтр, чтобы посмотреть результаты проверки.' : 'Проверьте, что документ содержит названия товаров и требования к ним, и загрузите спецификацию снова.'}</p>{resultFilter !== 'all' && <button type="button" onClick={() => setResultFilter('all')} className="mt-4 text-label-md text-primary hover:underline">Показать все позиции</button>}</div>}
+            {visibleItems.map(({ item, index }) => (
               <article key={`${item.source_section || item.product_name}-${index}`} className="overflow-hidden rounded-2xl border border-outline-variant bg-surface-container-lowest shadow-sm">
                 <div className="flex flex-wrap items-start justify-between gap-3 p-4 md:p-5">
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1 basis-64">
                     <p className="text-label-sm text-primary">Позиция {index + 1}{item.source_section ? ` · ${item.source_section}` : ''}</p>
-                    <h3 className="mt-1 text-title-lg font-title-lg text-on-surface">{item.product_name}</h3>
-                    {item.specs && <p className="mt-2 max-w-4xl text-body-sm text-on-surface-variant">{item.specs}</p>}
+                    <h3 className="mt-1 break-words text-title-lg font-semibold text-on-surface">{item.product_name}</h3>
+                    {item.specs && <details className="group mt-3 max-w-4xl"><summary className="cursor-pointer text-label-sm text-on-surface-variant transition-colors hover:text-primary">Требования из документа</summary><p className="mt-2 break-words whitespace-pre-line rounded-lg bg-surface-container-low p-3 text-body-sm text-on-surface-variant">{item.specs}</p></details>}
                   </div>
                   <div className="flex flex-col items-start gap-2 sm:items-end">
                     <span className="rounded-lg bg-surface-container-low px-3 py-2 text-label-md text-on-surface">По ТЗ: {requiredAmount(item)}</span>
@@ -496,15 +568,14 @@ export default function QuickCheckPage() {
                   </div>
                 </div>
                 {item.state === 'ready' ? <>
+                  <ProductDiscoveryCards productName={item.product_name} leads={item.results} requestedQuantity={item.quantity} requestedUnit={item.unit} />
                   {(() => {
                     const best = item.results.find(isVerifiedProductLead);
-                    if (!best) return null;
-                    return <div className="border-t border-outline-variant bg-surface-container-low px-4 py-4 md:px-5">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <h4 className="text-title-md font-title-md text-on-surface">Доказательства по лучшему найденному товару</h4>
-                        {best.url && <a href={best.url} target="_blank" rel="noopener noreferrer" className="text-label-sm text-primary hover:underline">Открыть источник ↗</a>}
-                      </div>
+                    if (!best?.checks?.length) return null;
+                    return <details className="group border-t border-outline-variant bg-surface-container-low px-4 py-4 md:px-5">
+                      <summary className="cursor-pointer text-body-sm font-semibold text-on-surface">Доказательства по первому найденному товару <span className="ml-1 text-label-sm font-normal text-on-surface-variant">({best.checks.length})</span></summary>
                       <p className="mt-1 text-body-sm text-on-surface-variant">{best.title || 'Товар без названия'} · сведения с открытой страницы продавца</p>
+                      {best.url && <a href={best.url} target="_blank" rel="noopener noreferrer" className="mt-2 inline-flex items-center gap-1 text-label-sm text-primary hover:underline">Открыть источник<span aria-hidden="true" className="material-symbols-outlined text-[15px]">open_in_new</span></a>}
                       <div className="mt-3 space-y-2">
                         {(best.checks ?? []).map((check, checkIndex) => (
                           <div key={`${check.id || checkIndex}-${checkIndex}`} className="grid gap-1 rounded-lg border border-outline-variant bg-surface-container-lowest p-3 text-body-sm md:grid-cols-[minmax(0,1fr)_125px_minmax(0,1fr)] md:gap-3">
@@ -514,18 +585,47 @@ export default function QuickCheckPage() {
                           </div>
                         ))}
                       </div>
-                    </div>;
+                    </details>;
                   })()}
-                  <ProductDiscoveryCards productName={item.product_name} leads={item.results} requestedQuantity={item.quantity} requestedUnit={item.unit} />
                 </> : (
-                  <div aria-live="polite" className="border-t border-outline-variant px-5 py-4 text-body-sm text-on-surface-variant">
-                    {item.state === 'error' ? item.error : item.state === 'searching' ? 'Ищем товарные страницы и сверяем характеристики…' : 'Ожидает проверки…'}
+                  <div aria-live="polite" className={`flex items-center gap-3 border-t border-outline-variant px-5 py-5 text-body-sm ${item.state === 'error' ? 'bg-error-container/30 text-error' : 'bg-surface-container-low/50 text-on-surface-variant'}`}>
+                    <span aria-hidden="true" className={`material-symbols-outlined text-[20px] ${item.state === 'searching' ? 'animate-spin text-primary' : ''}`}>{item.state === 'error' ? 'error' : item.state === 'searching' ? 'progress_activity' : 'schedule'}</span>
+                    {item.state === 'error' ? item.error || 'Не удалось выполнить поиск. Повторите его для этой позиции.' : item.state === 'searching' ? 'Ищем товарные страницы и сверяем характеристики…' : 'Позиция ожидает проверки. Поиск начнётся по очереди.'}
                   </div>
                 )}
               </article>
             ))}
           </section>
         )}
+
+        <section id="quick-check-history" className="scroll-mt-6 overflow-hidden rounded-2xl border border-outline-variant bg-surface-container-lowest shadow-sm" aria-label="История проверок">
+          <div className="flex flex-wrap items-start justify-between gap-4 p-5 md:p-6">
+            <div><p className="mb-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-primary">Личное пространство</p><h2 className="text-title-lg font-semibold text-on-surface">История проверок</h2><p className="mt-1 text-body-sm text-on-surface-variant">Возвращайтесь к результатам и обновляйте данные продавцов.</p></div>
+            <button type="button" disabled={loadingHistory} onClick={() => void refreshHistory()} className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-outline-variant px-3 py-2 text-label-sm text-on-surface transition-colors hover:border-primary hover:text-primary disabled:opacity-50"><span aria-hidden="true" className={`material-symbols-outlined text-[17px] ${loadingHistory ? 'animate-spin' : ''}`}>refresh</span>Обновить</button>
+          </div>
+          <div className="grid divide-y divide-outline-variant border-y border-outline-variant bg-surface-container-low/50 sm:grid-cols-3 sm:divide-x sm:divide-y-0">
+            {[
+              { label: 'Сохранённых проверок', value: historyStats.total_reports, icon: 'folder' },
+              { label: 'Позиций в документах', value: historyStats.total_items, icon: 'inventory_2' },
+              { label: 'Позиций проверено', value: historyStats.checked_items, icon: 'task_alt' },
+            ].map((stat) => <div key={stat.label} className="flex items-center justify-between gap-3 px-5 py-4 md:px-6"><span className="flex items-center gap-2 text-label-sm text-on-surface-variant"><span aria-hidden="true" className="material-symbols-outlined text-[18px] text-primary">{stat.icon}</span>{stat.label}</span><span className="text-title-lg font-semibold tabular-nums text-on-surface">{!history.length && (loadingHistory || historyError) ? '—' : stat.value}</span></div>)}
+          </div>
+          <div className="p-5 md:p-6">
+            {history.length > 0 && <label className="mb-4 flex max-w-md items-center gap-2 rounded-lg border border-outline-variant bg-surface-container-low px-3 py-2.5 text-on-surface-variant focus-within:border-primary"><span aria-hidden="true" className="material-symbols-outlined text-[18px]">search</span><input type="search" value={historyQuery} onChange={(event) => setHistoryQuery(event.target.value)} placeholder="Найти загруженную проверку…" aria-label="Поиск среди загруженных проверок по имени файла" className="min-w-0 flex-1 bg-transparent text-body-sm text-on-surface outline-none placeholder:text-on-surface-variant" /></label>}
+            {historyError && <p role="alert" className="mb-4 flex items-start gap-2 rounded-lg bg-error-container px-4 py-3 text-body-sm text-on-error-container"><span aria-hidden="true" className="material-symbols-outlined text-[18px]">error</span>{historyError}</p>}
+            {loadingHistory && !history.length ? <div role="status" aria-label="Загрузка истории проверок" className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{[0, 1, 2].map((value) => <div key={value} className="animate-pulse rounded-xl border border-outline-variant p-4"><div className="h-3 w-4/5 rounded bg-surface-container-high" /><div className="mt-3 h-2.5 w-2/3 rounded bg-surface-container" /><div className="mt-4 h-2.5 w-1/3 rounded bg-surface-container" /></div>)}</div> : filteredHistory.length ? <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {filteredHistory.map((report) => <div key={report.id} className={`flex items-stretch overflow-hidden rounded-xl border transition-colors hover:border-primary/60 ${parsed?.id === report.id ? 'border-primary/60 bg-primary/5' : 'border-outline-variant bg-surface-container-lowest'}`}>
+                <button type="button" aria-current={parsed?.id === report.id ? 'true' : undefined} disabled={busy || loadingReport || Boolean(deletingReportId)} onClick={() => void openReport(report.id)} className="min-w-0 flex-1 p-4 text-left disabled:opacity-50">
+                  <div className="flex items-center gap-2"><span aria-hidden="true" className={`material-symbols-outlined shrink-0 text-[20px] text-primary ${openingReportId === report.id ? 'animate-spin' : ''}`}>{openingReportId === report.id ? 'progress_activity' : 'description'}</span><span title={report.filename} className="truncate text-body-sm font-semibold text-on-surface">{report.filename}</span></div>
+                  <span className="mt-2 block text-label-sm text-on-surface-variant">{formatDate(report.created_at)}</span>
+                  <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1"><span className={`inline-flex items-center gap-1 text-label-sm ${report.processing_state === 'error' ? 'text-error' : 'text-primary'}`}><span aria-hidden="true" className="material-symbols-outlined text-[14px]">{['queued', 'running'].includes(report.processing_state) ? 'schedule' : report.processing_state === 'error' ? 'error' : report.processing_state === 'completed' ? 'check_circle' : 'pending'}</span>{reportStatus(report.processing_state)}</span><span className="text-label-sm tabular-nums text-on-surface-variant">{report.checked_items} / {report.total_items}</span></div>
+                </button>
+                <button type="button" title="Удалить проверку" aria-label={`Удалить проверку ${report.filename}`} disabled={busy || loadingReport || Boolean(deletingReportId)} onClick={() => void deleteReport(report)} className="flex min-w-11 items-center justify-center border-l border-outline-variant px-2 text-on-surface-variant transition-colors hover:bg-error-container hover:text-on-error-container disabled:opacity-50"><span aria-hidden="true" className={`material-symbols-outlined text-[18px] ${deletingReportId === report.id ? 'animate-spin' : ''}`}>{deletingReportId === report.id ? 'progress_activity' : 'delete'}</span></button>
+              </div>)}
+            </div> : !historyError && <div className="py-7 text-center"><span aria-hidden="true" className="material-symbols-outlined text-[32px] text-on-surface-variant">{historyQuery ? 'search_off' : 'folder_open'}</span><p className="mt-2 text-body-md font-semibold text-on-surface">{historyQuery ? 'По этому имени ничего не найдено' : 'Ваша первая проверка появится здесь'}</p><p className="mx-auto mt-1 max-w-md text-body-sm text-on-surface-variant">{historyQuery ? 'Попробуйте другую часть имени файла или загрузите более ранние проверки.' : 'Загрузите PDF или Word выше. Сохраним результаты, чтобы вы могли вернуться к ним в любое время.'}</p>{historyQuery && <button type="button" onClick={() => setHistoryQuery('')} className="mt-3 text-label-md text-primary hover:underline">Сбросить поиск</button>}</div>}
+            {nextHistoryCursor && <button type="button" disabled={loadingHistory} onClick={() => void loadMoreHistory()} className="mt-5 inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-lg border border-outline-variant px-4 py-2 text-label-md text-on-surface transition-colors hover:border-primary hover:text-primary disabled:opacity-50"><span aria-hidden="true" className={`material-symbols-outlined text-[18px] ${loadingHistory ? 'animate-spin' : ''}`}>{loadingHistory ? 'progress_activity' : 'expand_more'}</span>{loadingHistory ? 'Загружаем…' : 'Загрузить более ранние проверки'}</button>}
+          </div>
+        </section>
       </div>
     </AppShell>
   );

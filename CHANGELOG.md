@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.5.0 — 2026-10-18
+
+### Changed
+
+- Refined the shared workspace with a consistent brand, navy navigation, clear page hierarchy, correctly loaded typography, inverse-button contrast, visible keyboard focus, and reduced-motion support.
+- Added Quick Check to desktop and mobile navigation, with accessible server-backed project search and quick actions.
+- Reworked the dashboard with real loaded-project metrics, deadline priorities, responsive portfolio rows, cancellable search, pagination, and recoverable loading/error/empty states.
+- Quick Check now validates files immediately, displays product cards before long source text and history, and provides progress, report filters, and connection feedback.
+- Improved login and native modal dialogs, including keyboard focus, retry messages, and an exact date-and-time deadline when creating a tender.
+
+### Fixed
+
+- Notifications now consume the API's direct response shape and update read counts correctly.
+- Parallel requests and binary exports share a token refresh; rotated refresh tokens are returned by the backend.
+- Temporary provider rate limits, server failures, and network outages retain the current session.
+- Stale requests cannot restore a logged-out session, replay a mutation under another account, or finish a download after the session changes.
+- Theme and account changes synchronize between tabs; multiple theme controls within one page stay consistent.
+
+### Verification
+
+- 256 backend tests, 19 frontend API regression tests, frontend lint, TypeScript, and the production build pass.
+- Desktop/mobile browser checks use clearly labelled synthetic fixtures, covering search beyond the first page, pagination, editing, notifications, Word-report cards, filtering, dialogs, and theme synchronization.
+- Fixture UI checks do not establish current third-party sourcing availability or real production authentication. See `docs/05_Development/Enterprise Workspace QA.md`.
+
 ## 1.4.3 — 2026-10-05
 
 ### Added

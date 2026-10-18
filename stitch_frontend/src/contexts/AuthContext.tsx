@@ -1,8 +1,8 @@
 "use client";
 
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
-import { api } from '@/lib/api';
+import { api, asError, AUTH_SESSION_KEY, clearSessionTokens, errorMessage, saveSessionTokens } from '@/lib/api';
 
 interface User {
   id: string;
@@ -15,6 +15,7 @@ interface User {
 interface AuthContextType {
   user: User | null;
   isLoading: boolean;
+  authError: string | null;
   login: (access_token: string, refresh_token: string, user?: User) => void;
   logout: () => void;
   refreshUser: () => Promise<void>;
@@ -26,61 +27,84 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const requestVersion = useRef(0);
 
-  const fetchUser = async () => {
+  const fetchUser = useCallback(async (signal?: AbortSignal) => {
+    const version = ++requestVersion.current;
     try {
       if (typeof window !== 'undefined' && localStorage.getItem('access_token')) {
-        const userData = await api.get('/auth/me');
+        const userData = await api.get('/auth/me', { signal });
+        if (version !== requestVersion.current || signal?.aborted) return;
         setUser(userData);
-      } else {
+        setAuthError(null);
+      } else if (version === requestVersion.current) {
         setUser(null);
+        setAuthError(null);
       }
     } catch (error) {
-      console.error('Failed to fetch user:', error);
-      setUser(null);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        if (typeof window !== 'undefined' && localStorage.getItem('access_token')) {
-          const userData = await api.get('/auth/me');
-          if (!cancelled) setUser(userData);
-        } else if (!cancelled) {
-          setUser(null);
-        }
-      } catch (error) {
-        console.error('Failed to fetch user:', error);
-        if (!cancelled) setUser(null);
-      } finally {
-        if (!cancelled) setIsLoading(false);
+      if (version !== requestVersion.current || signal?.aborted) return;
+      const status = asError(error).status;
+      if (status === 401 || status === 403 || !localStorage.getItem('access_token')) {
+        setUser(null);
+        setAuthError(null);
+      } else {
+        // Keep the session during an outage and let the user retry profile loading.
+        setAuthError(errorMessage(error, 'Не удалось загрузить профиль. Повторите попытку.'));
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    } finally {
+      if (version === requestVersion.current && !signal?.aborted) setIsLoading(false);
+    }
   }, []);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    queueMicrotask(() => {
+      if (!controller.signal.aborted) void fetchUser(controller.signal);
+    });
+    const onStorage = (event: StorageEvent) => {
+      const isLogout = event.key === 'access_token' && event.newValue === null;
+      if (event.key !== AUTH_SESSION_KEY && event.key !== null && !isLogout) return;
+      requestVersion.current += 1;
+      setUser(null);
+      setAuthError(null);
+      setIsLoading(!!localStorage.getItem('access_token'));
+      void fetchUser();
+    };
+    window.addEventListener('storage', onStorage);
+    return () => {
+      controller.abort();
+      requestVersion.current += 1;
+      window.removeEventListener('storage', onStorage);
+    };
+  }, [fetchUser]);
+
   const login = (access_token: string, refresh_token: string, user?: User) => {
-    localStorage.setItem('access_token', access_token);
-    localStorage.setItem('refresh_token', refresh_token);
-    if (user) setUser(user);
-    fetchUser();
+    requestVersion.current += 1;
+    saveSessionTokens(access_token, refresh_token);
+    setAuthError(null);
+    setUser(user ?? null);
+    setIsLoading(!user);
+    if (!user) void fetchUser();
   };
 
   const logout = () => {
-    localStorage.removeItem('access_token');
-    localStorage.removeItem('refresh_token');
+    requestVersion.current += 1;
+    clearSessionTokens();
     setUser(null);
+    setAuthError(null);
+    setIsLoading(false);
     router.replace('/login');
   };
 
+  const refreshUser = async () => {
+    if (!user) setIsLoading(true);
+    setAuthError(null);
+    await fetchUser();
+  };
+
   return (
-    <AuthContext.Provider value={{ user, isLoading, login, logout, refreshUser: fetchUser }}>
+    <AuthContext.Provider value={{ user, isLoading, authError, login, logout, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

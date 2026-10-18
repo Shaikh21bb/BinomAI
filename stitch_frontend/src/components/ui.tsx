@@ -3,6 +3,8 @@ import { ReactNode } from 'react';
 const STATUS_META: Record<string, { label: string; className: string; dot: string }> = {
   draft: { label: 'Черновик', className: 'bg-slate-100 text-slate-700 border border-slate-200', dot: 'bg-slate-400' },
   processing: { label: 'Обработка', className: 'bg-blue-50 text-blue-700 border border-blue-200', dot: 'bg-blue-500' },
+  searching: { label: 'Поиск товаров', className: 'bg-blue-50 text-blue-700 border border-blue-200', dot: 'bg-blue-500' },
+  error: { label: 'Ошибка', className: 'bg-error-container text-on-error-container border border-error/20', dot: 'bg-error' },
   analyzing: { label: 'Анализ', className: 'bg-blue-50 text-blue-700 border border-blue-200', dot: 'bg-blue-500' },
   clarifying: { label: 'Уточнение', className: 'bg-indigo-50 text-indigo-700 border border-indigo-200', dot: 'bg-indigo-500' },
   generating: { label: 'Генерация', className: 'bg-violet-50 text-violet-700 border border-violet-200', dot: 'bg-violet-500' },
