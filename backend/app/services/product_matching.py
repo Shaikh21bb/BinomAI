@@ -30,8 +30,17 @@ _LOGISTICS_OR_BUYER_INSTRUCTION = re.compile(
     r"цен\w*|остатк\w*|контакт\w*|телефон\w*|магазин\w*)\b|https?://|@",
     re.I,
 )
-_STANDARD = re.compile(r"(?:СТ РК\s+)?ГОСТ\s+[А-ЯA-Z]?\s*\d+(?:-\d+)*", re.I)
+_STANDARD = re.compile(r"(?<!\w)(?:СТ\s+РК\s+)?ГОСТ\s+(?:[А-ЯA-Z]\s+)?\d+(?:-\d+)*(?![\w-])", re.I)
 _CERTIFICATION = re.compile(r"ГОСТ|\bСТ\s+РК\b|сертификат|декларац", re.I)
+_CERTIFICATION_UNPROVEN = re.compile(
+    r"\b(?:нет\s+(?:сертификат\w*|подтверждени\w*|декларац\w*)|"
+    r"не\s+(?:требу\w*|предостав\w*|подтвержд\w*)|без\s+сертификат\w*|отсутств\w*)", re.I,
+)
+_COMPOSITION_MATERIAL = r"(?:шерст\w*|хлоп\w*|акрил\w*|полиэстер\w*|вискоз\w*|эластан\w*)"
+_MATERIAL_PERCENT = re.compile(
+    rf"(?P<before>\d+(?:[,.]\d+)?)\s*%\s*(?:(?:натуральн\w*|мериносов\w*)\s+)?(?P<after_material>{_COMPOSITION_MATERIAL})"
+    rf"|(?P<before_material>{_COMPOSITION_MATERIAL})\s*[:—-]?\s*(?P<after>\d+(?:[,.]\d+)?)\s*%", re.I,
+)
 _GARMENT_CATEGORIES = ("жакет", "кардиган", "пиджак", "куртк", "рубашк", "джемпер", "брюк", "плать")
 
 
@@ -129,7 +138,7 @@ def _source_quote(source: str, phrase: str) -> str:
 
 def _evidence_segments(evidence: str) -> list[str]:
     return [part.strip() for part in re.split(
-        r"[\n;|]|,\s*(?=(?:потребляемая\s+мощность|мощность|объ[её]м|вес|масса|напряжение)\b)",
+        r"[\n;|]|[/,]\s*(?=(?:(?:потребляемая|входная|номинальная)\s+)?(?:мощность|всасывание|объ[её]м|вес|масса|напряжение)\b)",
         evidence, flags=re.I,
     ) if part.strip()]
 
@@ -166,6 +175,30 @@ def _material_conflict(requirement: str, evidence: str) -> str:
     return ""
 
 
+def _composition_percentage_check(requirement: str, evidence: str) -> dict[str, str] | None:
+    required_numbers = _measurements(requirement)
+    material = re.search(_COMPOSITION_MATERIAL, requirement, re.I)
+    if len(required_numbers) != 1 or required_numbers[0][1] != "percent" or not material:
+        return None
+    stem = material.group(0).casefold()[:5]
+    required_value = required_numbers[0][0]
+    found = []
+    for line in evidence.splitlines():
+        for pair in _MATERIAL_PERCENT.finditer(line):
+            component = pair.group("after_material") or pair.group("before_material")
+            if not component.casefold().startswith(stem):
+                continue
+            value = Decimal((pair.group("before") or pair.group("after")).replace(",", "."))
+            found.append((value, line[:220]))
+    if not found:
+        return {"status": "unknown", "evidence": ""}
+    distinct = {value for value, _ in found}
+    if len(distinct) > 1:
+        return {"status": "unknown", "evidence": ""}
+    value, quote = found[0]
+    return {"status": "matched" if _number_matches(required_value, value, requirement) else "mismatch", "evidence": quote}
+
+
 def _compare_locally(requirement: str, evidence: str) -> dict[str, str]:
     if not evidence:
         return {"status": "unknown", "evidence": ""}
@@ -179,11 +212,23 @@ def _compare_locally(requirement: str, evidence: str) -> dict[str, str]:
                 return {"status": "mismatch", "evidence": line[:220]}
     if _CERTIFICATION.search(requirement):
         required_standard = _STANDARD.search(requirement)
+        standard_key = _norm(required_standard.group(0)) if required_standard else None
+        standard_quotes = []
         for line in evidence.splitlines():
-            if required_standard and _norm(required_standard.group(0)) not in _norm(line):
+            if standard_key and standard_key not in {_norm(standard) for standard in _STANDARD.findall(line)}:
                 continue
-            if _CERTIFICATION.search(line) and re.search(r"\b(?:не\s+(?:соответств\w*|предостав\w*|подтвержд\w*|сертифицир\w*)|без\s+сертификат\w*|отсутств\w*)", line, re.I):
+            if not _CERTIFICATION.search(line):
+                continue
+            if re.search(r"\bне\s+(?:соответств\w*|сертифицир\w*)", line, re.I):
                 return {"status": "mismatch", "evidence": line[:220]}
+            if _CERTIFICATION_UNPROVEN.search(line):
+                return {"status": "unknown", "evidence": ""}
+            standard_quotes.append(line[:220])
+        if standard_key:
+            return {"status": "matched", "evidence": standard_quotes[0]} if standard_quotes else {"status": "unknown", "evidence": ""}
+    composition = _composition_percentage_check(requirement, evidence)
+    if composition is not None:
+        return composition
     required_numbers = _measurements(requirement)
     if required_numbers:
         context = _number_context(requirement)
@@ -193,6 +238,12 @@ def _compare_locally(requirement: str, evidence: str) -> dict[str, str]:
             if any(kind == unit for _, kind in title_values) and not any(kind == unit and _number_matches(value, found, requirement) for found, kind in title_values):
                 return {"status": "mismatch", "evidence": evidence.splitlines()[0][:220]}
         relevant = [line for line in _evidence_segments(evidence) if all(word in _norm(line) for word in context)]
+        # Unlabelled slash pairs or several power values in one segment do not
+        # establish which number belongs to the requested characteristic.
+        if any(unit == "power_w" for _, unit in required_numbers):
+            relevant = [line for line in relevant if
+                        len({value for value, kind in _measurements(line) if kind == "power_w"}) <= 1
+                        and not re.search(r"\d\s*/\s*\d", line)]
         for line in relevant:
             values = _measurements(line)
             if all(any(kind == unit and _number_matches(value, found, requirement) for found, kind in values) for value, unit in required_numbers):

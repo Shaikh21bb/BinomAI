@@ -147,3 +147,45 @@ async def test_ai_cannot_attach_an_existing_unrelated_quote_to_a_requirement(mon
 
     assert leads[0]["match_status"] == "partial"
     assert all(check["status"] == "unknown" for check in leads[0]["checks"][1:])
+
+
+@pytest.mark.parametrize("evidence,expected", [
+    ("Мощность всасывания: 400 Вт / потребляемая мощность: 470 Вт", "mismatch"),
+    ("Мощность всасывания: 400 Вт | потребляемая мощность: 470 Вт", "mismatch"),
+    ("Мощность всасывания: 400 Вт; потребляемая мощность: 470 Вт", "mismatch"),
+    ("Мощность всасывания: 400 Вт, потребляемая мощность: 470 Вт", "mismatch"),
+    ("Мощность всасывания: 470 Вт / потребляемая мощность: 2100 Вт", "matched"),
+    ("Мощность всасывания / потребляемая мощность: 400 Вт / 470 Вт", "unknown"),
+    ("Мощность всасывания: 400/470 Вт", "unknown"),
+])
+def test_power_values_belong_to_their_label_not_a_neighbor(evidence, expected):
+    assert _compare_locally("мощность всасывания 470 Вт", evidence)["status"] == expected
+
+
+@pytest.mark.parametrize("evidence,expected", [
+    ("Состав: 100% акрил, 10% шерсть", "mismatch"),
+    ("Состав: акрил 100%, шерсть 10%", "mismatch"),
+    ("Состав: шерсть 10%, акрил 100%", "mismatch"),
+    ("Состав: 10% шерсть и 90% акрил", "mismatch"),
+    ("Состав: 100% шерсть", "matched"),
+    ("Состав: шерсть 100%", "matched"),
+    ("Состав: 100% натуральная шерсть", "matched"),
+    ("Состав: шерсть, акрил. Проценты не указаны", "unknown"),
+])
+def test_percentage_is_bound_to_its_composition_component(evidence, expected):
+    assert _compare_locally("100% шерсть", evidence)["status"] == expected
+
+
+@pytest.mark.parametrize("evidence,expected", [
+    ("Нет сертификата ГОСТ 25295-2003", "unknown"),
+    ("Сертификат ГОСТ 25295-2003 отсутствует", "unknown"),
+    ("Сертификат отсутствует: ГОСТ 25295-2003", "unknown"),
+    ("Товар не требует ГОСТ 25295-2003", "unknown"),
+    ("Соответствие ГОСТ 25295-2003 не подтверждено", "unknown"),
+    ("Не соответствует ГОСТ 25295-2003", "mismatch"),
+    ("Соответствует ГОСТ 25295-20030", "unknown"),
+    ("Соответствует ГОСТ 25295-2003-2020", "unknown"),
+    ("Соответствует ГОСТ 25295-2003", "matched"),
+])
+def test_standard_identity_and_negation_are_checked_before_substring_match(evidence, expected):
+    assert _compare_locally("ГОСТ 25295-2003", evidence)["status"] == expected
