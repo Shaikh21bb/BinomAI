@@ -1,6 +1,7 @@
 import re
 import asyncio
 import html
+import math
 from html.parser import HTMLParser
 import structlog
 import httpx
@@ -9,7 +10,8 @@ from urllib.parse import parse_qs, parse_qsl, quote, urljoin, urlparse, unquote
 
 from app.core.config import settings
 from app.services.product_identity import contains_model, model_identifiers
-from app.services.product_pages import fetch_product_page, is_public_url, looks_like_product_url
+from app.services.product_matching import _compare_locally, _requirements, _type_check
+from app.services.product_pages import _IMAGE_NOISE, fetch_product_page, is_public_url, looks_like_product_url
 
 logger = structlog.get_logger(__name__)
 
@@ -18,7 +20,7 @@ _TYPE_STOP_WORDS = {
     "женский", "женская", "женское", "мужской", "мужская", "детский", "детская", "шт", "штук",
 }
 _MAX_PAGE_READS = 24
-_MAX_QUERY_VARIANTS = 3
+_MAX_QUERY_VARIANTS = 6
 _COMPLETE_IN_STOCK_TARGET = 3
 
 
@@ -52,21 +54,27 @@ def _search_queries(query: str, specs: str | None = None) -> list[str]:
     primary = _primary_query(query)
     supplied = " ".join([query, specs or ""])
     supplied = re.split(r"(?:Место|Срок|Адрес|Условия)\s+поставки\s*:", supplied, maxsplit=1, flags=re.I)[0]
-    qualifiers = list(dict.fromkeys(re.findall(
-        r"\bна\s+(?:молнии|замке)\b|(?:плотн\w*\s+)?вязк\w*|трикотаж\w*|шерст\w*|"
+    materials = re.findall(r"\bшерст\w*", supplied, re.I)
+    fasteners = re.findall(r"\bна\s+(?:молнии|замке)\b", supplied, re.I)
+    # These two phrases describe the same fastening, not an invented alternative
+    # material/brand. Separate queries avoid requiring every tender word in SEO.
+    zipper = ["на молнии"] if any("замке" in value.casefold() for value in fasteners) else []
+    if fasteners and not zipper:
+        zipper = ["на замке"]
+    construction = re.findall(r"(?:плотн\w*\s+)?вязк\w*|трикотаж\w*", supplied, re.I)
+    measurements = re.findall(
         r"(?<![a-z0-9])\d+(?:[,.]\d+)?\s*(?:мл|кг|мм|см|кВт|Вт|литр\w*|дюйм\w*)(?!\w)",
         supplied, re.I,
-    )))[:4]
-    options = [primary]
-    if query != primary:
-        options.append(query)
-    if qualifiers:
-        qualified = f"{primary} {' '.join(qualifiers)}"
-        if specs:
-            options.insert(0, qualified)
-        else:
-            options.append(qualified)
-    options.append(f"{primary} в наличии")
+    )
+    qualifiers = list(dict.fromkeys(value.casefold() for value in [
+        *materials, *zipper, *construction, *measurements, *fasteners,
+    ]))
+    # Reserve both an availability-intent query and the broad type. A long full
+    # name must not consume the slot needed for an independent characteristic.
+    focused = [f"{primary} {value}" for value in qualifiers if value not in primary.casefold()]
+    options = focused[:_MAX_QUERY_VARIANTS - 2] + [f"{primary} в наличии", primary]
+    if not specs:
+        options = [primary, *focused[:_MAX_QUERY_VARIANTS - 2], f"{primary} в наличии"]
     unique: dict[str, str] = {}
     for option in options:
         value = " ".join(option.split())[:150]
@@ -84,10 +92,63 @@ def _result_quality(row: Dict[str, Any]) -> tuple:
     )
 
 
-def _complete_in_stock(results: List[Dict[str, Any]]) -> int:
+def _local_requirement_states(row: Dict[str, Any], requirements: List[Dict[str, str]]) -> list[str]:
+    """Pure source checks only: discovery must never call an AI for each batch."""
+    if not (row.get("is_product_page") and row.get("page_verified")):
+        return []
+    evidence = row.get("evidence_text") or ""
+    return [
+        (_type_check(req["text"], evidence) if req["id"] == "type" else _compare_locally(req["text"], evidence))["status"]
+        for req in requirements
+    ]
+
+
+def _technical_quality(row: Dict[str, Any], requirements: List[Dict[str, str]]) -> tuple:
+    states = _local_requirement_states(row, requirements)
+    if not states:
+        rank = -1
+    elif "mismatch" in states:
+        rank = 0
+    elif states[0] != "matched":
+        rank = 1
+    else:
+        rank = 3 if all(state == "matched" for state in states) else 2
+    return rank, _result_quality(row), states.count("matched")
+
+
+def _positive_number(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        number = float(value)
+        return math.isfinite(number) and number > 0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _commercially_complete_in_stock(row: Dict[str, Any]) -> bool:
+    image = row.get("image_url")
+    currency = row.get("currency")
+    phones = row.get("seller_phones")
+    phone_values = [*(phones if isinstance(phones, list) else []), row.get("seller_phone")]
+    return bool(
+        row.get("is_product_page") and row.get("page_verified") and is_public_url(row.get("url") or "")
+        and row.get("availability") == "InStock"
+        and (row.get("stock_quantity") is None or _positive_number(row["stock_quantity"]))
+        and isinstance(image, str) and is_public_url(image) and not _IMAGE_NOISE.search(image)
+        and _positive_number(row.get("price")) and isinstance(currency, str) and currency.strip()
+        and any(isinstance(phone, str) and phone.strip() and re.search(r"\d", phone) for phone in phone_values)
+    )
+
+
+def _complete_in_stock(results: List[Dict[str, Any]], requirements: List[Dict[str, str]]) -> int:
+    if len(requirements) < 2:
+        # A confirmed type alone is not technical compliance with a tender.
+        return 0
     return sum(
-        bool(row.get("is_product_page") and row.get("page_verified") and row.get("availability") == "InStock"
-             and row.get("image_url") and row.get("price") and row.get("seller_phone"))
+        bool(_commercially_complete_in_stock(row)
+             and (states := _local_requirement_states(row, requirements))
+             and all(state == "matched" for state in states))
         for row in results
     )
 
@@ -108,7 +169,7 @@ MARKETPLACES = [
 ]
 
 
-async def search_products(query: str, region: Optional[str] = None, *, specs: str | None = None) -> List[Dict[str, Any]]:
+async def search_products(query: str, region: Optional[str] = None, *, specs: str | None = None, closure_policy: str | None = None) -> List[Dict[str, Any]]:
     """
     Search the web for a product by name + specs, optionally scoped to a region.
     Priority: Google CSE (if configured) -> DuckDuckGo -> marketplace links fallback.
@@ -117,11 +178,14 @@ async def search_products(query: str, region: Optional[str] = None, *, specs: st
     results: List[Dict[str, Any]] = []
     visited: set[tuple] = set()
     queries = _search_queries(query, specs)
+    requirements = _requirements(query, specs, closure_policy=closure_policy) if closure_policy is not None else _requirements(query, specs)
     primary_query = queries[0]
 
-    async def consume(batch: List[Dict[str, Any]]) -> None:
+    async def consume(batch: List[Dict[str, Any]], remaining_batches: int = 1) -> None:
         nonlocal results
         candidates = []
+        remaining_reads = _MAX_PAGE_READS - len(visited)
+        page_limit = min(8, max(1, (remaining_reads + remaining_batches - 1) // remaining_batches))
         relevant = _unique_results(_relevant_candidates(batch, query))
         for row in sorted(relevant, key=lambda row: not looks_like_product_url(row.get("url") or "")):
             key = _url_identity(row.get("url") or "")
@@ -129,7 +193,7 @@ async def search_products(query: str, region: Optional[str] = None, *, specs: st
                 continue
             visited.add(key)
             candidates.append(row)
-            if len(candidates) >= 8:
+            if len(candidates) >= page_limit:
                 break
         if candidates:
             enriched = _relevant_candidates(await enrich_product_pages(candidates), query)
@@ -143,23 +207,23 @@ async def search_products(query: str, region: Optional[str] = None, *, specs: st
         if settings.GOOGLE_CSE_API_KEY and settings.GOOGLE_CSE_ID:
             google_results = await _google_cse(q, region)
             if google_results:
-                await consume(google_results)
+                await consume(google_results, len(queries) + 2)
     except Exception as e:
         logger.warning("google_cse_search_failed", error=str(e)[:200])
 
-    for search_query in queries:
-        if _complete_in_stock(results) >= _COMPLETE_IN_STOCK_TARGET or len(visited) >= _MAX_PAGE_READS:
+    for index, search_query in enumerate(queries):
+        if _complete_in_stock(results, requirements) >= _COMPLETE_IN_STOCK_TARGET or len(visited) >= _MAX_PAGE_READS:
             break
         try:
-            await consume(await _duckduckgo(search_query, region))
+            await consume(await _duckduckgo(search_query, region), len(queries) - index + 1)
         except Exception as e:
             logger.warning("duckduckgo_search_failed", error_type=type(e).__name__)
 
     # Long tender prose can make generic web search return categories. A short
     # marketplace product-page query gives concrete items to inspect.
     try:
-        if _complete_in_stock(results) >= _COMPLETE_IN_STOCK_TARGET or len(visited) >= _MAX_PAGE_READS:
-            return sorted(results, key=_result_quality, reverse=True)[:12]
+        if _complete_in_stock(results, requirements) >= _COMPLETE_IN_STOCK_TARGET or len(visited) >= _MAX_PAGE_READS:
+            return sorted(results, key=lambda row: _technical_quality(row, requirements), reverse=True)[:12]
         marketplace_query = re.sub(r"моющее средство для посуды", "средство для мытья посуды", primary_query, flags=re.I)
         short_query = marketplace_query.split(";")[0][:85]
         targeted_batches = await asyncio.gather(
@@ -180,7 +244,7 @@ async def search_products(query: str, region: Optional[str] = None, *, specs: st
         logger.warning("targeted_product_search_failed", error_type=type(e).__name__)
 
     # Search pages remain discoverable links, not concrete product cards.
-    results = sorted(results, key=_result_quality, reverse=True)
+    results = sorted(results, key=lambda row: _technical_quality(row, requirements), reverse=True)
     return results[:12] if any(row.get("is_product_page") for row in results) else results[:10] + _marketplace_links(query, region)
 
 

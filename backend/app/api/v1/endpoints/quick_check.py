@@ -5,6 +5,7 @@ import binascii
 from datetime import datetime, timedelta, timezone
 import hashlib
 import uuid
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from fastapi.encoders import jsonable_encoder
@@ -47,6 +48,7 @@ class QuickSearchRequest(BaseModel):
     specs: str | None = Field(default=None, max_length=12000)
     report_id: uuid.UUID | None = None
     item_index: int | None = Field(default=None, ge=0, lt=_MAX_ITEMS)
+    closure_policy: Literal["source", "zipper_only", "allow_alternatives"] | None = None
 
 
 def _report_payload(report: QuickCheckReport) -> dict:
@@ -75,11 +77,17 @@ async def _queue_report(db: AsyncSession, report: QuickCheckReport) -> dict:
     return _report_payload(report)
 
 
-def _fresh_items(items: list[dict]) -> list[dict]:
+def _saved_closure_policy(item: dict) -> str | None:
+    value = item.get("closure_policy")
+    return value if value in {"source", "zipper_only", "allow_alternatives"} else None
+
+
+def _fresh_items(items: list[dict], *, preserve_clarifications: bool = False) -> list[dict]:
     product_fields = ("product_name", "specs", "quantity", "unit", "source_section")
     return [
         {
             **{key: item[key] for key in product_fields if key in item},
+            **({"closure_policy": _saved_closure_policy(item)} if preserve_clarifications and _saved_closure_policy(item) else {}),
             "state": "pending",
             "results": [],
             "checked_at": None,
@@ -114,7 +122,9 @@ async def _report_or_404(
         QuickCheckReport.created_by == user.id,
     )
     if lock:
-        query = query.with_for_update()
+        # The same session may have read this report before an external search.
+        # Refresh identity-map attributes under the lock before comparing versions.
+        query = query.with_for_update().execution_options(populate_existing=True)
     report = (await db.execute(query)).scalars().first()
     if report is None:
         raise HTTPException(status_code=404, detail="Проверка не найдена.")
@@ -229,7 +239,7 @@ async def rerun_quick_report(
         ocr_pages=original.ocr_pages,
         total_items=original.total_items,
         truncated=original.truncated,
-        items=_fresh_items(original.items),
+        items=_fresh_items(original.items, preserve_clarifications=True),
         processing_state="queued",
         run_id=uuid.uuid4(),
         pdf_sha256=original.pdf_sha256,
@@ -374,7 +384,12 @@ async def search_quick_product(
     )
     if (body.report_id is None) != (body.item_index is None):
         raise HTTPException(status_code=422, detail="Укажите номер сохранённой проверки и позиции вместе.")
+    if body.closure_policy is not None and body.report_id is None:
+        raise HTTPException(status_code=422, detail="Уточнение применяется только к позиции сохранённой проверки.")
     name, specs = body.product_name, body.specs
+    closure_policy = body.closure_policy
+    started_policy = None
+    started_run_id = None
     if body.report_id is not None and body.item_index is not None:
         report = await _report_or_404(db, body.report_id, user)
         if report.processing_state in {"queued", "running"}:
@@ -385,17 +400,33 @@ async def search_quick_product(
         if item.get("product_name") != body.product_name:
             raise HTTPException(status_code=409, detail="Позиция изменилась. Откройте сохранённую проверку снова.")
         name, specs = item["product_name"], item.get("specs")
+        started_policy = _saved_closure_policy(item)
+        started_run_id = report.run_id
+        if closure_policy is None:
+            closure_policy = started_policy
 
+    # Do not hold a database connection across external searches. The locked
+    # read below refreshes and validates the original snapshot again.
+    await db.commit()
     query = _build_search_query(name, specs)
-    results = await search_products(query, specs=specs)
-    checked = jsonable_encoder((await evaluate_product_leads(name, specs, results))[:16])
+    matching_options = {"closure_policy": closure_policy} if closure_policy in {"zipper_only", "allow_alternatives"} else {}
+    results = await search_products(query, specs=specs, **matching_options)
+    checked = jsonable_encoder((await evaluate_product_leads(name, specs, results, **matching_options))[:16])
     checked_at = datetime.now(timezone.utc).isoformat()
 
     if body.report_id is not None and body.item_index is not None:
         report = await _report_or_404(db, body.report_id, user, lock=True)
+        if report.processing_state in {"queued", "running"} or report.run_id != started_run_id:
+            raise HTTPException(status_code=409, detail="Уже запущена другая проверка. Откройте сохранённый отчёт снова.")
+        if body.item_index >= len(report.items):
+            raise HTTPException(status_code=409, detail="Позиция изменилась. Откройте сохранённый отчёт снова.")
+        current = report.items[body.item_index]
+        if (current.get("product_name"), current.get("specs"), _saved_closure_policy(current)) != (name, specs, started_policy):
+            raise HTTPException(status_code=409, detail="ТЗ или уточнение изменилось во время поиска. Откройте сохранённый отчёт снова.")
         updated = list(report.items)
         updated[body.item_index] = {
             **updated[body.item_index],
+            **({"closure_policy": closure_policy} if closure_policy is not None else {}),
             "state": "ready",
             "results": checked,
             "checked_at": checked_at,
@@ -405,4 +436,4 @@ async def search_quick_product(
             report.processing_state = "completed"
         await db.flush()
 
-    return {"results": checked, "checked_at": checked_at}
+    return {"results": checked, "checked_at": checked_at, "closure_policy": closure_policy}

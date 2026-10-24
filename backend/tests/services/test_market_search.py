@@ -3,6 +3,7 @@ import json
 import pytest
 
 from app.services.market_search import (
+    _complete_in_stock,
     _decode_ddg_url,
     _matching_models,
     _parse_duckduckgo_results,
@@ -14,7 +15,7 @@ from app.services.market_search import (
     search_products,
 )
 from app.services.product_pages import parse_product_page
-from app.services.product_matching import _type_check, evaluate_product_leads
+from app.services.product_matching import _requirements, _type_check, evaluate_product_leads
 
 
 @pytest.mark.parametrize("wrapper", [
@@ -64,11 +65,151 @@ def test_query_variants_use_only_supplied_characteristics_and_stay_bounded():
         "Жакет шерстяной; Горловина круглая. Место поставки: улица5, дом40; 2100Вт",
     )
     assert "Жакет женский" in variants
-    assert 2 <= len(variants) <= 3
+    assert 2 <= len(variants) <= 6
     assert any("шерстяной" in query for query in variants)
     assert "шерстяной" in variants[0]
+    assert "Жакет женский на молнии" in variants
+    assert "Жакет женский плотной вязки" in variants
+    assert "Жакет женский в наличии" in variants
+    assert not any("шерстяной" in query and "вязки" in query for query in variants)
     assert not any("2100" in query or "дом40" in query or "Philips" in query for query in variants)
-    assert len(_search_queries("Philips FC9734/01", "Мощность2100 Вт")) <= 3
+    assert len(_search_queries("Philips FC9734/01", "Мощность2100 Вт")) <= 6
+    assert len(variants) == len(set(query.casefold() for query in variants))
+
+
+def test_query_slots_preserve_availability_and_type_when_many_characteristics_exist():
+    variants = _search_queries(
+        "Жакет женский на замке из плотной вязки",
+        "Материал: шерсть; Трикотаж; Длина 80 см; Ширина 50 см; Вес 2 кг",
+    )
+    assert len(variants) == 6
+    assert variants[-2:] == ["Жакет женский в наличии", "Жакет женский"]
+    assert "Жакет женский шерсть" in variants
+    assert "Жакет женский на молнии" in variants
+    assert "Жакет женский плотной вязки" in variants
+    assert "Жакет женский Трикотаж".casefold() in {query.casefold() for query in variants}
+
+
+@pytest.mark.parametrize("override", [
+    {"price": 0}, {"price": -10}, {"price": float("nan")}, {"price": float("inf")}, {"price": True},
+    {"currency": None}, {"currency": " "}, {"stock_quantity": 0}, {"stock_quantity": -1},
+    {"stock_quantity": float("nan")}, {"image_url": "https://images.example.kz/logo.jpg"},
+    {"image_url": "https://images.example.kz/placeholder.jpg"}, {"image_url": "data:image/png;base64,abc"},
+    {"seller_phone": " "}, {"seller_phone": "Позвонить"}, {"page_verified": False},
+])
+def test_instock_early_stop_requires_valid_published_commerce_not_truthy_fields(override):
+    row = {"title": "Жакет женский", "url": "https://shop.example.kz/product/1", "is_product_page": True,
+           "page_verified": True, "availability": "InStock", "image_url": "https://images.example.kz/jacket.jpg",
+           "price": 50000, "currency": "KZT", "seller_phone": "+77001112233",
+           "evidence_text": "Жакет женский\nМатериал: шерсть"}
+    requirements = _requirements("Жакет женский", "Материал: шерсть")
+    assert _complete_in_stock([row], requirements) == 1
+    assert _complete_in_stock([{**row, **override}], requirements) == 0
+
+
+def test_instock_early_stop_accepts_current_phone_list_but_not_type_only_confirmation():
+    row = {"url": "https://shop.example.kz/product/1", "is_product_page": True, "page_verified": True,
+           "availability": "InStock", "stock_quantity": None, "image_url": "https://images.example.kz/jacket.jpg",
+           "price": 50000, "currency": "KZT", "seller_phones": ["", "+77001112233"],
+           "evidence_text": "Жакет женский\nМатериал: шерсть"}
+    assert _complete_in_stock([row], _requirements("Жакет женский", "Материал: шерсть")) == 1
+    assert _complete_in_stock([row], _requirements("Жакет женский", None)) == 0
+
+
+@pytest.mark.parametrize("evidence", [
+    "Жакет женский\nМатериал: хлопок\nГОСТ 25295-2003",
+    "Жакет женский\nМатериал: шерсть",
+    "Жакет\nМатериал: шерсть\nГОСТ 25295-2003",
+])
+@pytest.mark.asyncio
+async def test_three_commercially_complete_instock_cards_do_not_stop_with_unproven_requirements(monkeypatch, evidence):
+    from app.core.config import settings
+    from app.services import market_search, product_matching
+
+    queries = []
+
+    async def search(query, *_args):
+        queries.append(query)
+        prefix = "wrong" if len(queries) == 1 else "matched"
+        return [{"title": "Жакет женский", "url": f"https://shop.example.kz/product/{prefix}-{n}"} for n in range(3)]
+
+    async def enrich(rows):
+        return [{**row, "is_product_page": True, "page_verified": True, "availability": "InStock",
+                 "image_url": "https://images.example.kz/jacket.jpg", "price": 50000, "currency": "KZT", "seller_phone": "+77001112233",
+                 "evidence_text": evidence if "wrong" in row["url"] else "Жакет женский\nМатериал: шерсть\nГОСТ 25295-2003"} for row in rows]
+
+    async def forbidden_ai(*_args):
+        raise AssertionError("Discovery must not invoke a paid AI check")
+
+    monkeypatch.setattr(settings, "GOOGLE_CSE_API_KEY", None)
+    monkeypatch.setattr(settings, "GOOGLE_AI_API_KEY", "configured-but-not-used")
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "configured-but-not-used")
+    monkeypatch.setattr(market_search, "_duckduckgo", search)
+    monkeypatch.setattr(market_search, "enrich_product_pages", enrich)
+    monkeypatch.setattr(product_matching, "_ask_ai", forbidden_ai)
+    rows = await search_products("Жакет женский", specs="Материал: шерсть; ГОСТ 25295-2003")
+
+    assert len(queries) == 2
+    assert all("matched" in row["url"] for row in rows[:3])
+    assert all("evidence_text" in row for row in rows)
+    assert not any("match_status" in row for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_three_source_verified_fully_matching_instock_cards_stop_without_extra_search(monkeypatch):
+    from app.core.config import settings
+    from app.services import market_search
+
+    calls = []
+
+    async def search(query, *_args):
+        calls.append(query)
+        return [{"title": "Жакет женский", "url": f"https://shop.example.kz/product/{n}"} for n in range(3)]
+
+    async def enrich(rows):
+        return [{**row, "is_product_page": True, "page_verified": True, "availability": "InStock",
+                 "image_url": "https://images.example.kz/jacket.jpg", "price": 50000, "currency": "KZT", "seller_phone": "+77001112233",
+                 "evidence_text": "Жакет женский\nМатериал: шерсть"} for row in rows]
+
+    async def forbidden_fallback(*_args):
+        raise AssertionError("Fully evidenced results should stop further source requests")
+
+    monkeypatch.setattr(settings, "GOOGLE_CSE_API_KEY", None)
+    monkeypatch.setattr(market_search, "_duckduckgo", search)
+    monkeypatch.setattr(market_search, "_satu_search", forbidden_fallback)
+    monkeypatch.setattr(market_search, "enrich_product_pages", enrich)
+    rows = await search_products("Жакет женский", specs="Материал: шерсть")
+    assert len(calls) == 1
+    assert len(rows) == 3
+    assert all(row.get("stock_quantity") is None for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_explicit_item_closure_policy_is_forwarded_to_local_requirements_only_when_chosen(monkeypatch):
+    from app.core.config import settings
+    from app.services import market_search
+
+    policies = []
+
+    def requirements(name, specs, *, closure_policy=None):
+        policies.append(closure_policy)
+        return _requirements("Жакет женский", "Материал: шерсть")
+
+    async def search(*_args):
+        return [{"title": "Жакет женский", "url": f"https://shop.example.kz/product/{n}"} for n in range(3)]
+
+    async def enrich(rows):
+        return [{**row, "is_product_page": True, "page_verified": True, "availability": "InStock",
+                 "image_url": "https://images.example.kz/jacket.jpg", "price": 50000, "currency": "KZT",
+                 "seller_phone": "+77001112233", "evidence_text": "Жакет женский\nМатериал: шерсть"} for row in rows]
+
+    monkeypatch.setattr(settings, "GOOGLE_CSE_API_KEY", None)
+    monkeypatch.setattr(market_search, "_requirements", requirements)
+    monkeypatch.setattr(market_search, "_duckduckgo", search)
+    monkeypatch.setattr(market_search, "enrich_product_pages", enrich)
+    await search_products("Жакет женский на замке", specs="Материал: шерсть", closure_policy="allow_alternatives")
+    await search_products("Жакет женский на замке", specs="Материал: шерсть")
+    assert policies == ["allow_alternatives", None]
 
 
 @pytest.mark.parametrize("availability,verified", [(None, False), ("OutOfStock", True)])
@@ -134,6 +275,43 @@ async def test_search_crawl_budget_is_shared_across_all_queries(monkeypatch):
     await search_products("Philips FC9734/01", specs="Мощность2100 Вт")
     assert len(reads) == 24
     assert len(set(reads)) == 24
+
+
+@pytest.mark.asyncio
+async def test_each_grounded_query_gets_read_budget_and_late_matching_cards_survive_result_cap(monkeypatch):
+    from app.core.config import settings
+    from app.services import market_search
+
+    queries = []
+    reads = []
+    query = "Жакет женский на замке из плотной вязки"
+    specs = "Материал: шерсть; Трикотаж"
+    expected_queries = _search_queries(query, specs)
+
+    async def search(search_query, *_args):
+        queries.append(search_query)
+        return [{"title": "Жакет женский", "url": f"https://shop.example.kz/product/{len(queries)}-{n}"} for n in range(20)]
+
+    async def enrich(rows):
+        reads.extend(row["url"] for row in rows)
+        return [{**row, "is_product_page": True, "page_verified": True, "availability": "InStock",
+                 "image_url": "https://images.example.kz/jacket.jpg", "price": 50000, "currency": "KZT", "seller_phone": "+77001112233",
+                 "evidence_text": "Жакет женский\nЗастежка: молния\nПлотная вязка\nТрикотаж\nМатериал: "
+                                  + ("шерсть" if len(queries) == len(expected_queries) else "хлопок")} for row in rows]
+
+    async def forbidden_fallback(*_args):
+        raise AssertionError("The shared read budget must prevent further fallback requests")
+
+    monkeypatch.setattr(settings, "GOOGLE_CSE_API_KEY", None)
+    monkeypatch.setattr(market_search, "_duckduckgo", search)
+    monkeypatch.setattr(market_search, "_satu_search", forbidden_fallback)
+    monkeypatch.setattr(market_search, "enrich_product_pages", enrich)
+    rows = await search_products(query, specs=specs)
+
+    assert queries == expected_queries
+    assert 12 < len(reads) == len(set(reads)) <= 24
+    assert len(rows) == 12
+    assert all(f"/product/{len(expected_queries)}-" in row["url"] for row in rows[:3])
 
 
 def test_grounded_same_vendor_product_dedup_preserves_variants_and_other_stores():

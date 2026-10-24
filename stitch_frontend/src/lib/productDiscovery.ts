@@ -34,6 +34,20 @@ export interface DiscoveryReportItem {
   state: 'pending' | 'searching' | 'ready' | 'error';
   results: DiscoveryLead[];
   checked_at?: string | null;
+  closure_policy?: ClosurePolicy | null;
+}
+
+export type ClosurePolicy = 'source' | 'zipper_only' | 'allow_alternatives';
+
+export const CLOSURE_POLICY_LABELS: Record<ClosurePolicy, string> = {
+  source: 'По исходному ТЗ',
+  zipper_only: 'Только молния',
+  allow_alternatives: 'Молния, пуговицы или без застёжки',
+};
+
+export function supportsClosureClarification(item: { product_name: string; specs?: string | null }) {
+  const garment = /кофт|кардиган|джемпер|свитер|жакет|куртк|жилет|толстовк|худи|пуловер|блуз|рубашк|плать|комбинезон|костюм|олимпийк|ветровк|пальто|свитшот/i.test(item.product_name);
+  return garment && /молни|замок|замк|заст[её]жк/i.test(`${item.product_name} ${item.specs ?? ''}`);
 }
 
 export type ProductLeadFilter = 'all' | 'in-stock' | 'complete' | 'requirements' | 'combined';
@@ -113,11 +127,68 @@ export function hasConfirmedProductRequirements(lead: DiscoveryLead) {
     && Boolean(lead.checks?.every((check) => check.status === 'matched'));
 }
 
+/** Published offer evidence only: exact order quantity remains a separate check. */
+export function isConfirmedProductOffer(lead: DiscoveryLead) {
+  return hasConfirmedProductRequirements(lead) && isMatchingInStockLead(lead) && isCompleteProductLead(lead);
+}
+
+export interface ProductConfirmationGap {
+  code: string;
+  label: string;
+  requirements?: string[];
+}
+
+/** Explain the existing strict predicate without turning missing evidence into a match. */
+export function productConfirmationGaps(lead: DiscoveryLead): ProductConfirmationGap[] {
+  const gaps: ProductConfirmationGap[] = [];
+  const scope = productVerificationScope(lead);
+  const checks = lead.checks ?? [];
+  if (!lead.page_verified) gaps.push({ code: 'page', label: 'Страницу товара не удалось прочитать.' });
+  if (!isVerifiedProductLead(lead)) gaps.push({ code: 'type', label: 'Тип товара не подтверждён.' });
+  if (!checks.length) gaps.push({ code: 'requirements-unchecked', label: 'Проверка технических требований по странице не выполнена.' });
+  else if (!scope.technicalCount) gaps.push({ code: 'requirements-missing', label: 'Технические требования не выделены — сверьте исходное ТЗ.' });
+  const mismatches = checks.filter((check) => check.status === 'mismatch').map((check) => check.requirement);
+  const unknown = checks.filter((check) => check.status === 'unknown').map((check) => check.requirement);
+  if (mismatches.length) gaps.push({ code: 'requirements-mismatch', label: 'Есть расхождения с выделенными требованиями.', requirements: mismatches });
+  if (unknown.length) gaps.push({ code: 'requirements-unknown', label: 'Не все выделенные требования подтверждены.', requirements: unknown });
+  if (scope.technicalCount && !mismatches.length && !unknown.length && !hasConfirmedProductRequirements(lead)) gaps.push({ code: 'verification', label: 'Итоговое соответствие требованиям не подтверждено.' });
+  const invalidStock = lead.stock_quantity != null && (!Number.isFinite(lead.stock_quantity) || lead.stock_quantity <= 0);
+  if (!lead.page_verified || lead.availability !== 'InStock' || invalidStock) {
+    const label = lead.page_verified && lead.availability === 'OutOfStock'
+      ? 'На странице указано: нет в наличии.'
+      : lead.page_verified && lead.availability === 'InStock' && invalidStock
+        ? 'Наличие противоречит опубликованному остатку.'
+        : 'Наличие не подтверждено прочитанной страницей.';
+    gaps.push({ code: 'availability', label });
+  }
+  if (!hasProductPhoto(lead)) gaps.push({ code: 'photo', label: 'Нет опубликованного фото товара с прочитанной страницы.' });
+  if (!lead.page_verified || lead.price == null || !Number.isFinite(Number(lead.price)) || Number(lead.price) <= 0 || !lead.currency?.trim()) gaps.push({ code: 'price', label: 'Не подтверждена положительная цена с валютой.' });
+  if (!publishedProductPhones(lead).length) gaps.push({ code: 'contact', label: 'Телефон на странице источника не найден.' });
+  return gaps;
+}
+
+export function productQuantityMessage(quantity: number | string | null | undefined, unit: string, verdict: 'enough' | 'shortage' | 'unknown') {
+  const amount = Number(quantity);
+  if (quantity == null || !Number.isFinite(amount) || amount <= 0) return 'Количество в ТЗ не указано — уточните объём заказа.';
+  if (verdict !== 'unknown') return null;
+  return `Количество по заказу (${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 4 }).format(amount)} ${unit}) не подтверждено. Уточните доступный остаток у продавца.`;
+}
+
+export function reportConfirmationGaps(items: DiscoveryReportItem[]) {
+  const unique = new Map<string, ProductConfirmationGap>();
+  for (const item of items.filter((row) => row.state === 'ready')) {
+    for (const lead of visibleProductLeads(item.results)) {
+      for (const gap of productConfirmationGaps(lead)) if (!unique.has(gap.code)) unique.set(gap.code, gap);
+    }
+  }
+  return [...unique.values()];
+}
+
 function matchesProductFilter(lead: DiscoveryLead, filter: ProductLeadFilter) {
   if (filter === 'in-stock') return isMatchingInStockLead(lead);
   if (filter === 'complete') return isCompleteProductLead(lead);
   if (filter === 'requirements') return hasConfirmedProductRequirements(lead);
-  if (filter === 'combined') return hasConfirmedProductRequirements(lead) && isMatchingInStockLead(lead) && isCompleteProductLead(lead);
+  if (filter === 'combined') return isConfirmedProductOffer(lead);
   return true;
 }
 
@@ -196,13 +267,14 @@ export function productDiscoveryCsv(filename: string, items: DiscoveryReportItem
     'Статус характеристики', 'Доказательство со страницы', 'Источник', 'Опубликованный остаток',
     'Единица остатка', 'Статус проверки позиции', 'Страница прочитана', 'Тип товара подтверждён',
     'Технических требований выделено', 'Технических требований подтверждено',
+    'Уточнение застёжки для выполненного поиска',
   ]];
   items.forEach((item, index) => {
     const leads = item.state === 'ready' ? visibleProductLeads(item.results) : [];
     if (!leads.length) {
       const status = item.state === 'ready' ? 'Товарные страницы не найдены' : item.state === 'error' ? 'Ошибка поиска' : 'Поиск не завершён';
       rows.push([filename, item.checked_at, index + 1, item.product_name, item.quantity, item.unit,
-        '', '', '', status, '', '', '', '', '', '', item.state, '', '', '', '']);
+        '', '', '', status, '', '', '', '', '', '', item.state, '', '', '', '', CLOSURE_POLICY_LABELS[item.closure_policy ?? 'source']]);
     }
     leads.forEach((lead) => {
       const scope = productVerificationScope(lead);
@@ -214,6 +286,7 @@ export function productDiscoveryCsv(filename: string, items: DiscoveryReportItem
         check?.evidence, lead.url, lead.stock_quantity, lead.stock_unit, item.state,
         lead.page_verified ? 'Да' : 'Нет', isVerifiedProductLead(lead) ? 'Да' : 'Нет',
         scope.technicalCount, scope.confirmedTechnicalCount,
+        CLOSURE_POLICY_LABELS[item.closure_policy ?? 'source'],
       ]));
     });
   });

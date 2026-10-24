@@ -361,6 +361,89 @@ def _own_product_identity(product: dict[str, Any], page_url: str, heading: str, 
     return False
 
 
+class _ProductDetailsParser(HTMLParser):
+    """Read the first item's description/specification component, not recommendations."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack: list[dict[str, Any]] = []
+        self.heading_seen = False
+        self.root_chosen = False
+        self.text: list[str] = []
+        self.properties: dict[str, str] = {}
+        self.row: dict[str, Any] | None = None
+        self.description_open = True
+        self.attributes_open = True
+        self.section_heading: dict[str, Any] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
+        attributes = dict(attrs)
+        classes = (attributes.get("class") or "").casefold()
+        context = " ".join(attributes.get(key) or "" for key in ("class", "id", "data-testid", "data-widget_type"))
+        parent = self.stack[-1] if self.stack else {}
+        ignored = parent.get("ignored", False) or tag in {"script", "style", "nav", "footer", "header", "aside"} or bool(
+            re.search(r"related|recommend|upsell|cross.sell|recently.viewed", context, re.I)
+        )
+        if tag == "h1" and not ignored:
+            self.heading_seen = True
+        is_root = bool(set(classes.split()) & {
+            "product-description", "product__description", "product-details", "product-specifications", "product-attributes",
+        }) or bool(re.search(r"(?:item|product)description[\w-]*__root(?:\s|$)", classes))
+        root = self.heading_seen and not self.root_chosen and is_root and not ignored
+        if root:
+            self.root_chosen = True
+        scoped = root or parent.get("scoped", False)
+        entry = {"tag": tag, "ignored": ignored, "scoped": scoped, "field": parent.get("field")}
+        if scoped and not ignored:
+            if tag in {"h2", "h3", "h4"}:
+                self.section_heading = {"entry": entry, "text": []}
+            if self.attributes_open and re.search(r"(?:^|[-_\s])(?:attr|attribute|spec|property)row(?:\s|$)", classes):
+                self.row = {"entry": entry, "label": [], "value": []}
+            if self.row is not None:
+                if re.search(r"(?:attr|attribute|spec|property)(?:label|name)(?:\s|$)", classes):
+                    entry["field"] = "label"
+                elif re.search(r"(?:attr|attribute|spec|property)value(?:\s|$)", classes):
+                    entry["field"] = "value"
+        if tag not in _VOID_TAGS:
+            self.stack.append(entry)
+
+    def handle_data(self, data: str):
+        if not self.stack or self.stack[-1]["ignored"] or not self.stack[-1]["scoped"]:
+            return
+        if self.row is not None:
+            field = self.stack[-1].get("field")
+            if field:
+                self.row[field].append(data)
+        elif self.section_heading is not None:
+            self.section_heading["text"].append(data)
+        elif self.description_open:
+            self.text.append(data)
+
+    def handle_endtag(self, tag: str):
+        index = next((i for i in range(len(self.stack) - 1, -1, -1) if self.stack[i]["tag"] == tag), None)
+        if index is None:
+            return
+        removed = self.stack[index:]
+        if self.section_heading is not None and any(self.section_heading["entry"] is entry for entry in removed):
+            label = _clean(" ".join(self.section_heading["text"])).casefold()
+            self.description_open = label in {"описание", "о товаре", "description", "product description"}
+            self.attributes_open = self.description_open or bool(re.search(
+                r"характеристик|параметр|состав|материал|specification|product details|properties", label,
+            ))
+            self.section_heading = None
+        if self.row is not None and any(self.row["entry"] is entry for entry in removed):
+            label = _clean(" ".join(self.row["label"]), 100)
+            value = _clean(" ".join(self.row["value"]), 250)
+            if label and value:
+                # Conflicting component rows are ambiguous, never choose the nicer one.
+                previous = self.properties.get(label)
+                self.properties[label] = value if previous in {None, value} else f"{previous}; {value}"
+            self.row = None
+        if any(entry["scoped"] for entry in removed):
+            self.text.append("\n")
+        del self.stack[index:]
+
+
 class _PageParser(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -378,9 +461,21 @@ class _PageParser(HTMLParser):
         self._cell: list[str] | None = None
         self.rows: list[list[str]] = []
         self.canonical: str | None = None
+        self._nodes: list[dict[str, Any]] = []
+        self._section_heading: dict[str, Any] | None = None
+        self._non_product_section = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
         attributes = dict(attrs)
+        parent = self._nodes[-1] if self._nodes else {}
+        context = " ".join(attributes.get(key) or "" for key in ("class", "id", "data-testid", "data-widget_type"))
+        ignored = parent.get("ignored", False) or tag in {"nav", "header", "footer", "aside"} or bool(
+            re.search(r"related|recommend|upsell|cross.sell|recently.viewed", context, re.I)
+        )
+        if tag not in _VOID_TAGS:
+            self._nodes.append({"tag": tag, "ignored": ignored})
+        if tag in {"h2", "h3", "h4"} and not ignored:
+            self._section_heading = {"tag": tag, "text": []}
         if tag == "link" and "canonical" in (attributes.get("rel") or "").split():
             self.canonical = attributes.get("href")
         elif tag == "meta":
@@ -391,7 +486,7 @@ class _PageParser(HTMLParser):
             self._script = []
         elif tag == "title":
             self._title = []
-        elif tag == "h1":
+        elif tag == "h1" and not ignored:
             self._heading = []
             classes = (attributes.get("class") or "").split()
             self._heading_is_product = bool(set(classes) & {
@@ -406,22 +501,31 @@ class _PageParser(HTMLParser):
                     attributes.get(key) or "" for key in ("alt", "class", "id", "itemprop")
                 )
                 self.images.append((candidate, context))
-        elif tag == "tr":
+        elif tag == "tr" and not ignored and not self._non_product_section:
             self._row = []
         elif tag in {"th", "td"} and self._row is not None:
             self._cell = []
 
     def handle_data(self, data: str):
+        if self._section_heading is not None:
+            self._section_heading["text"].append(data)
         if self._script is not None:
             self._script.append(data)
         if self._title is not None:
             self._title.append(data)
         if self._heading is not None:
             self._heading.append(data)
-        if self._cell is not None:
+        if self._cell is not None and not (self._nodes and self._nodes[-1]["ignored"]):
             self._cell.append(data)
 
     def handle_endtag(self, tag: str):
+        if self._section_heading is not None and self._section_heading["tag"] == tag:
+            label = _clean(" ".join(self._section_heading["text"])).casefold()
+            if re.search(r"доставк|возврат|оплат|delivery|returns|shipping|payment", label):
+                self._non_product_section = True
+            elif re.search(r"описание|характеристик|параметр|состав|материал|description|specification|product details|properties", label):
+                self._non_product_section = False
+            self._section_heading = None
         if tag == "script" and self._script is not None:
             self.scripts.append("".join(self._script))
             self._script = None
@@ -441,6 +545,9 @@ class _PageParser(HTMLParser):
             if len(self._row) == 2 and all(self._row):
                 self.rows.append(self._row)
             self._row = None
+        index = next((i for i in range(len(self._nodes) - 1, -1, -1) if self._nodes[i]["tag"] == tag), None)
+        if index is not None:
+            del self._nodes[index:]
 
 
 def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
@@ -510,6 +617,11 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
     product = product or {}
     name = _clean(product.get("name") or parser.meta.get("og:title") or parser.heading or parser.title)
     description = _clean(product.get("description") or parser.meta.get("og:description") or parser.meta.get("description"), 2400)
+    details = _ProductDetailsParser()
+    details.feed(markup)
+    detailed_description = _clean(" ".join(details.text), 2400)
+    if detailed_description:
+        description = detailed_description
     properties: dict[str, str] = {}
     for prop in product.get("additionalProperty") or []:
         if isinstance(prop, dict):
@@ -519,6 +631,9 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
                 properties[key] = value
     for key, value in parser.rows[:50]:
         if key not in properties and len(key) < 100:
+            properties[key] = value
+    for key, value in list(details.properties.items())[:50]:
+        if key not in properties:
             properties[key] = value
 
     offer = product.get("offers") or {}

@@ -74,7 +74,7 @@ def _number_context(requirement: str) -> list[str]:
     ]
 
 
-def _requirements(name: str, specs: str | None) -> list[dict[str, str]]:
+def _requirements(name: str, specs: str | None, *, closure_policy: str | None = None) -> list[dict[str, str]]:
     requirements = [{"id": "type", "text": name.split(",", 1)[0].strip()}]
     seen = {_norm(requirements[0]["text"])}
     for number, unit in _NUMBER_UNIT.findall(name):
@@ -96,7 +96,7 @@ def _requirements(name: str, specs: str | None) -> list[dict[str, str]]:
     name_details = []
     if any(re.search(rf"\b{category}\w*", name, re.I) for category in _GARMENT_CATEGORIES):
         if re.search(r"на\s+(?:замке|молнии)", name, re.I):
-            name_details.append("Застежка: молния")
+            name_details.append("Допустимые застёжки: молния, пуговицы или без застёжки" if closure_policy == "allow_alternatives" else "Застежка: молния")
         if re.search(r"плотн\w*\s+вязк\w*", name, re.I):
             name_details.append("Плотная вязка")
         if re.search(r"трикотаж", name, re.I):
@@ -167,6 +167,8 @@ def _material_conflict(requirement: str, evidence: str) -> str:
                 return line[:220]
             if re.search(rf"\b{material}\w*\s*[:—-]?\s*(?:нет|отсутств\w*)\b", line, re.I):
                 return line[:220]
+            if re.search(rf"\b{material}\w*\s+не\s+(?:использ\w*|примен\w*|входит\w*)", line, re.I):
+                return line[:220]
         # A declared composition is evidence of a different material. A generic
         # mention elsewhere on the page is not enough to establish a conflict.
         explicit_composition = re.search(r"\b(?:состав|материал)\s*:", line, re.I) or re.search(r"100\s*%", line)
@@ -199,6 +201,154 @@ def _composition_percentage_check(requirement: str, evidence: str) -> dict[str, 
     return {"status": "matched" if _number_matches(required_value, value, requirement) else "mismatch", "evidence": quote}
 
 
+def _clothing_units(evidence: str) -> list[str]:
+    return [part.strip() for part in re.split(r"[\n;]|(?<=[.!?])\s+", evidence) if part.strip()]
+
+
+def _clothing_verdict(observations: list[tuple[str, str]]) -> dict[str, str]:
+    states = {state for state, _ in observations}
+    if not states or "unknown" in states or {"matched", "mismatch"}.issubset(states):
+        return {"status": "unknown", "evidence": ""}
+    state = "mismatch" if "mismatch" in states else "matched"
+    # Keep the published wording, including its negation. A clause too long to
+    # display as a whole is not used to confirm a characteristic.
+    quote = min((quote for value, quote in observations if value == state and len(quote) <= 220), key=len, default="")
+    return {"status": state, "evidence": quote} if quote else {"status": "unknown", "evidence": ""}
+
+
+def _wool_check(evidence: str) -> dict[str, str]:
+    observations = []
+    for unit in _clothing_units(evidence):
+        if not re.search(r"\bшерст\w*", unit, re.I):
+            continue
+        if re.search(r"\b(?:без\s+шерст\w*|не\s+содерж\w*\s+шерст\w*|шерст\w*\s*[:—-]?\s*(?:нет|отсутств\w*)|не\s+шерст\w*)", unit, re.I):
+            observations.append(("mismatch", unit))
+        elif re.search(r"\b(?:возмож\w*|может|имитац\w*|под\s+шерсть)\b", unit, re.I):
+            observations.append(("unknown", unit))
+        elif re.search(r"хлоп|акрил|полиэстер|вискоз|эластан", unit, re.I):
+            # A mixture is not silently interpreted as a wool garment.
+            observations.append(("unknown", unit))
+        elif re.search(r"шерстян\w*|(?:состав|материал|ткань)\s*[:—-].*\bшерст\w*|\bиз\s+(?:костюмной\s+|натуральной\s+)?шерст\w*", unit, re.I):
+            observations.append(("matched", unit))
+    return _clothing_verdict(observations)
+
+
+def _clothing_attribute_check(requirement: str, evidence: str) -> dict[str, str] | None:
+    """Bounded garment semantics; values must be affirmative product evidence."""
+    text = requirement.casefold().replace("ё", "е")
+    observations: list[tuple[str, str]] = []
+    if "шерст" in text:
+        supported_words = r"(?:материал|состав|ткань|из|шерст\w*|женск\w*|женщин\w*|мужск\w*|мужчин\w*|" + "|".join(category + r"\w*" for category in _GARMENT_CATEGORIES) + ")"
+        if not all(re.fullmatch(supported_words, word) for word in re.findall(r"[a-zа-яё]+", text)):
+            return {"status": "unknown", "evidence": ""}
+        wool = _wool_check(evidence)
+        if any(re.search(rf"\b{category}\w*", requirement, re.I) for category in _GARMENT_CATEGORIES):
+            garment = _garment_type_check(requirement, evidence)
+            if garment and garment["status"] != "matched":
+                return garment
+            if wool["status"] != "matched":
+                return wool
+            quotes = list(dict.fromkeys([garment["evidence"], wool["evidence"]])) if garment else [wool["evidence"]]
+            quote = "\n…\n".join(quotes)
+            return {"status": "matched", "evidence": quote} if len(quote) <= 220 else {"status": "unknown", "evidence": ""}
+        return wool
+
+    if "рукав" in text and "длинн" in text:
+        kind = "sleeve"
+    elif "карман" in text and re.search(r"\b(?:да|есть|наличи\w*)\b", text):
+        kind = "pockets"
+    elif re.search(r"застеж|на\s+(?:замке|молнии)", text):
+        kind = "closure"
+    elif re.search(r"горловин|вырез|воротник", text):
+        kind = "neck"
+    elif "плотн" in text and re.search(r"вязк|трикотаж", text):
+        kind = "knit"
+    elif "однотон" in text:
+        kind = "solid"
+    elif "пиджачн" in text:
+        kind = "style"
+    else:
+        return None
+
+    supported = {
+        "sleeve": r"рукав\w*|длинн\w*|длина",
+        "pockets": r"карман\w*|да|есть|наличи\w*",
+        "closure": r"застеж\w*|допустим\w*|молни\w*|пуговиц\w*|на|замке|без|можно|некотор\w*|модел\w*|или",
+        "neck": r"горловин\w*|вырез\w*|воротник\w*|разн\w*|кругл\w*|v|образн\w*|в|с",
+        "knit": r"плотн\w*|вязк\w*|трикотаж\w*",
+        "solid": r"цвет\w*|разн\w*|однотон\w*",
+        "style": r"стиль|крой|пиджачн\w*",
+    }[kind]
+    if not all(re.fullmatch(supported, word) for word in re.findall(r"[a-zа-яё]+", text)):
+        return {"status": "unknown", "evidence": ""}
+
+    for unit in _clothing_units(evidence):
+        normalized = unit.casefold().replace("ё", "е")
+        if kind == "sleeve" and "рукав" in normalized:
+            if re.search(r"рукав\w*\s*[:—-]?\s*(?:не\s+(?:указан\w*|извест\w*|определ\w*)|неизвест\w*|нет\s+данных)", normalized):
+                observations.append(("unknown", unit))
+            elif re.search(r"без\s+рукав|рукав\w*\s*[:—-]?\s*(?:нет|отсутств\w*|не\s+предусмотр\w*|коротк\w*|укороченн\w*|3\s*/\s*4)|(?:коротк|укороченн)\w*\s+рукав|не\s+длинн\w*", normalized):
+                observations.append(("mismatch", unit))
+            elif re.search(r"\bдлинн\w*\s+рукав\w*|\bрукав\w*\s*[:—-]?\s*длинн\w*", normalized):
+                observations.append(("matched", unit))
+        elif kind == "pockets" and "карман" in normalized:
+            if re.search(r"без\s+карман|карман\w*\s*[:—-]?\s*(?:нет|отсутств\w*|не\s+предусмотр\w*)", normalized):
+                observations.append(("mismatch", unit))
+            elif re.search(r"имитац|декоратив|фальш|обманк|нефункциональн|не\s+(?:явля\w*\s+)?функциональн|зашит", normalized):
+                observations.append(("unknown", unit))
+            elif re.search(r"(?:карман\w*\s*[:—-]\s*(?:да|есть|накладн\w*|прорезн\w*))|(?:два|двумя|две|2|накладн\w*|прорезн\w*)\s+карман", normalized):
+                observations.append(("matched", unit))
+        elif kind == "closure" and re.search(r"застеж|на\s+(?:замке|молнии)", normalized):
+            if re.search(r"не\s+предусмотр\w*\s+застежк|застежк\w*\s+на\s+молни\w*\s+(?:нет|отсутств\w*)", normalized):
+                observations.append(("mismatch" if "пуговиц" not in text and "без застежки" not in text else "unknown", unit))
+                continue
+            values = set()
+            if re.search(r"молни|на\s+замке", normalized) and not re.search(r"без\s+молни|молни\w*\s*[:—-]?\s*(?:нет|отсутств)|не\s+на\s+(?:замке|молнии)", normalized):
+                values.add("zipper")
+            if re.search(r"пуговиц", normalized):
+                values.add("button")
+            if re.search(r"без\s+застежки|застежк\w*\s*[:—-]?\s*(?:нет|отсутств)", normalized):
+                values.add("none")
+            allowed = set()
+            if re.search(r"молни|на\s+замке", text):
+                allowed.add("zipper")
+            if "пуговиц" in text:
+                allowed.add("button")
+            if "без застежки" in text:
+                allowed.add("none")
+            if len(values) > 1 or re.search(r"возмож|может|вариант|по\s+выбору", normalized):
+                observations.append(("unknown", unit))
+            elif values:
+                observations.append(("matched" if values <= allowed else "mismatch", unit))
+        elif kind == "neck" and re.search(r"горловин|вырез|воротник", normalized):
+            allowed = {value for value, pattern in (("round", r"кругл"), ("v", r"\bv\s*[- ]?\s*образ"), ("collar", r"воротник")) if re.search(pattern, text)}
+            values = set()
+            if re.search(r"\bкругл\w*", normalized) and not re.search(r"не\s+кругл", normalized):
+                values.add("round")
+            if re.search(r"\bv\s*[- ]?\s*образ", normalized):
+                values.add("v")
+            if re.search(r"с\s+воротник|воротник\w*\s*[:—-]\s*(?:классическ\w*|стойк\w*|отложн\w*)|классическ\w*\s+воротник", normalized) and not re.search(r"без\s+(?:классическ\w*\s+)?воротник|воротник\w*\s*[:—-]?\s*(?:нет|отсутств)", normalized):
+                values.add("collar")
+            if values and values <= allowed:
+                observations.append(("matched", unit))
+            elif values or re.search(r"квадратн|лодочк", normalized):
+                observations.append(("mismatch", unit))
+        elif kind == "knit" and re.search(r"вязк|трикотаж", normalized):
+            if re.search(r"\b(?:рыхл|тонк|неплотн)\w*|не\s+плотн|без\s+плотн|вязк\w*\s+не\s+предусмотр|не\s+явля\w*\s+плотн", normalized):
+                observations.append(("mismatch", unit))
+            elif re.search(r"\bплотн\w*", normalized):
+                observations.append(("matched", unit))
+        elif kind == "solid":
+            if re.search(r"\b(?:не\s+однотон\w*|принт\w*|микроузор\w*|клетчат\w*)|однотон\w*(?:\s+рисунок)?\s+не\s+предусмотр|рисунок\s*[:—-]\s*(?:клетк\w*|полоск\w*|цветочн\w*)", normalized):
+                observations.append(("mismatch", unit))
+            elif re.search(r"\bоднотон\w*", normalized):
+                observations.append(("matched", unit))
+        elif kind == "style" and re.search(r"стиль|крой", normalized):
+            if re.search(r"\bпиджачн\w*", normalized) and not re.search(r"не\s+пиджачн", normalized):
+                observations.append(("matched", unit))
+    return _clothing_verdict(observations)
+
+
 def _compare_locally(requirement: str, evidence: str) -> dict[str, str]:
     if not evidence:
         return {"status": "unknown", "evidence": ""}
@@ -208,7 +358,7 @@ def _compare_locally(requirement: str, evidence: str) -> dict[str, str]:
     mandatory_zipper = re.search(r"заст[её]жк\w*.*молни|на\s+(?:замке|молнии)", requirement, re.I) and not re.search(r"пуговиц|без\s+заст[её]жки", requirement, re.I)
     if mandatory_zipper:
         for line in evidence.splitlines():
-            if re.search(r"заст[её]жк\w*\s*[:—-]\s*(?:пуговиц\w*|кнопк\w*|нет)|без\s+заст[её]жки", line, re.I) and not re.search(r"молни", line, re.I):
+            if re.search(r"заст[её]жк\w*\s*(?:[:—-]\s*)?(?:на\s+)?(?:пуговиц\w*|кнопк\w*|нет)|без\s+заст[её]жки", line, re.I) and not re.search(r"молни", line, re.I):
                 return {"status": "mismatch", "evidence": line[:220]}
     if _CERTIFICATION.search(requirement):
         required_standard = _STANDARD.search(requirement)
@@ -256,6 +406,9 @@ def _compare_locally(requirement: str, evidence: str) -> dict[str, str]:
                 return {"status": "mismatch", "evidence": line[:220]}
         return {"status": "unknown", "evidence": ""}
 
+    clothing = _clothing_attribute_check(requirement, evidence)
+    if clothing is not None:
+        return clothing
     normalized = _norm(requirement)
     if len(normalized) >= 6 and normalized in _norm(evidence):
         return {"status": "matched", "evidence": _source_quote(evidence, requirement)}
@@ -275,8 +428,16 @@ def _garment_type_check(requirement: str, evidence: str) -> dict[str, str] | Non
         return {"status": "unknown", "evidence": ""}
     requested_gender = "female" if re.search(r"женск|женщин", requirement, re.I) else "male" if re.search(r"мужск|мужчин", requirement, re.I) else None
     if requested_gender:
-        same = r"женск|женщин" if requested_gender == "female" else r"мужск|мужчин"
-        other = r"мужск|мужчин" if requested_gender == "female" else r"женск|женщин"
+        same = r"женск|женщин|\bwomen\b|\bfemale\b" if requested_gender == "female" else r"мужск|мужчин|\bmen\b|\bmale\b"
+        other = r"мужск|мужчин|\bmen\b|\bmale\b" if requested_gender == "female" else r"женск|женщин|\bwomen\b|\bfemale\b"
+        labels = re.findall(r"(?im)^\s*(?:пол|для кого)\s*[:=—-]\s*([^\n]+)", evidence)
+        label_same = [label for label in labels if re.search(same, label, re.I)]
+        label_other = [label for label in labels if re.search(other, label, re.I)]
+        if (label_same and label_other) or (label_same and re.search(other, title, re.I)) or (label_other and re.search(same, title, re.I)):
+            return {"status": "unknown", "evidence": ""}
+        if label_other:
+            quote = next(line for line in evidence.splitlines() if label_other[0] in line)
+            return {"status": "mismatch", "evidence": quote[:220]}
         if re.search(other, title, re.I) and not re.search(same, title, re.I):
             return {"status": "mismatch", "evidence": title[:220]}
         if not re.search(same, evidence, re.I):
@@ -288,6 +449,13 @@ def _garment_type_check(requirement: str, evidence: str) -> dict[str, str] | Non
             if re.search(rf"\b{requested}\w*", line, re.I)
             and re.search(same, "\n".join(lines[index:index + 3])[:220], re.I)
         ), "")
+        if not category_quote and label_same:
+            own_category_quote = next((line for line in lines if re.search(rf"\b{requested}\w*", line, re.I) and len(line) <= 150), "")
+            gender_quote = next((line for line in lines if re.match(r"\s*(?:пол|для кого)\s*[:=—-]", line, re.I) and re.search(same, line, re.I)), "")
+            if own_category_quote and gender_quote:
+                category_quote = "\n…\n".join([own_category_quote, gender_quote])
+                if len(category_quote) > 220:
+                    category_quote = ""
         if not category_quote:
             return {"status": "unknown", "evidence": ""}
     return {"status": "matched", "evidence": category_quote}
@@ -400,8 +568,8 @@ async def _ask_ai(requirements: list[dict[str, str]], candidates: list[dict[str,
     return {}
 
 
-async def evaluate_product_leads(name: str, specs: str | None, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    requirements = _requirements(name, specs)
+async def evaluate_product_leads(name: str, specs: str | None, results: list[dict[str, Any]], *, closure_policy: str | None = None) -> list[dict[str, Any]]:
+    requirements = _requirements(name, specs, closure_policy=closure_policy)
     candidates = [row for row in results if row.get("is_product_page") and row.get("page_verified")]
     for row in results:
         evidence = row.get("evidence_text") or ""

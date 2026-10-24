@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, type DragEvent, type FormEvent } from 'rea
 import Link from 'next/link';
 import { AppShell } from '@/components/AppShell';
 import { ProductDiscoveryCards, isVerifiedProductLead, type DiscoveryLead } from '@/components/ProductDiscoveryCards';
-import { productDiscoveryCsv, quickCheckProgressLabel, reportItemHasProductCards, reportItemMatchesFilter, visibleProductLeads, type DiscoveryResultFilter } from '@/lib/productDiscovery';
+import { CLOSURE_POLICY_LABELS, productDiscoveryCsv, quickCheckProgressLabel, reportConfirmationGaps, reportItemHasProductCards, reportItemMatchesFilter, supportsClosureClarification, visibleProductLeads, type ClosurePolicy, type DiscoveryResultFilter } from '@/lib/productDiscovery';
 import { api, errorMessage } from '@/lib/api';
 import { assessStock, displayUnit } from '@/lib/productStock';
 
@@ -14,6 +14,7 @@ interface PdfItem {
   quantity?: number | null;
   unit?: string | null;
   source_section?: string | null;
+  closure_policy?: ClosurePolicy | null;
 }
 
 interface ParsedPdf {
@@ -59,7 +60,9 @@ function formatDate(value?: string | null) {
 }
 
 function downloadReport(report: ParsedPdf, items: CheckItem[]) {
-  const blob = new Blob([productDiscoveryCsv(report.filename, items)], { type: 'text/csv;charset=utf-8' });
+  // Export the policy used by the completed request, never an unapplied select draft.
+  const exportItems = items.map((item, index) => ({ ...item, closure_policy: report.items[index]?.closure_policy ?? 'source' as const }));
+  const blob = new Blob([productDiscoveryCsv(report.filename, exportItems)], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
@@ -146,6 +149,7 @@ export default function QuickCheckPage() {
   const completeItems = items.filter((item) => reportItemMatchesFilter(item, 'complete')).length;
   const requirementsItems = items.filter((item) => reportItemMatchesFilter(item, 'requirements')).length;
   const combinedItems = items.filter((item) => reportItemMatchesFilter(item, 'combined')).length;
+  const combinedGaps = reportConfirmationGaps(items);
   const leadFilter = resultFilter === 'in-stock' || resultFilter === 'complete' || resultFilter === 'requirements' || resultFilter === 'combined' ? resultFilter : 'all';
   const filteredHistory = history.filter((report) => report.filename.toLocaleLowerCase('ru-RU').includes(historyQuery.trim().toLocaleLowerCase('ru-RU')));
   const visibleItems = items.map((item, index) => ({ item, index })).filter(({ item, index }) => {
@@ -310,7 +314,9 @@ export default function QuickCheckPage() {
         specs: item.specs ?? null,
         report_id: reportId,
         item_index: index,
+        closure_policy: item.closure_policy ?? 'source',
       });
+      setParsed((current) => current?.id === reportId ? { ...current, items: current.items.map((row, rowIndex) => rowIndex === index ? { ...row, closure_policy: item.closure_policy ?? 'source' } : row) } : current);
       setItems((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, state: 'ready', results: response.results ?? [], checked_at: response.checked_at } : row));
       return true;
     } catch (searchError) {
@@ -559,7 +565,7 @@ export default function QuickCheckPage() {
             {resultFilter === 'requirements' && <p className="text-body-sm text-on-surface-variant">Все выделенные требования к товару подтверждены сведениями с прочитанной страницы, включая хотя бы одну техническую характеристику. Сверьте полноту требований с исходным ТЗ; наличие и количество проверяются отдельно.</p>}
             {resultFilter === 'combined' && <p className="text-body-sm text-on-surface-variant">Одновременно подтверждены все выделенные требования, на странице указано наличие, опубликованы фото, цена и телефон. Сверьте полноту требований с исходным ТЗ; достаточность количества и невыделенные документы или сертификаты ещё требуют проверки.</p>}
             {retryNotice && <div role="status" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-body-sm text-on-surface"><p>{retryNotice}</p>{resultFilter !== 'all' && <button type="button" onClick={() => setResultFilter('all')} className="text-primary hover:underline">Показать все позиции</button>}</div>}
-            {!visibleItems.length && <div className="rounded-xl border border-dashed border-outline-variant bg-surface-container-lowest px-5 py-10 text-center"><span aria-hidden="true" className="material-symbols-outlined text-[30px] text-on-surface-variant">filter_list_off</span><p className="mt-2 text-body-md font-semibold text-on-surface">{items.length ? 'В этом разделе пока нет позиций' : 'В документе не найдены позиции товаров'}</p><p className="mx-auto mt-1 max-w-md text-body-sm text-on-surface-variant">{items.length ? activeSearch ? 'Поиск продолжается. Новые результаты появятся автоматически.' : 'Выберите другой фильтр, чтобы посмотреть результаты проверки.' : 'Проверьте, что документ содержит названия товаров и требования к ним, и загрузите спецификацию снова.'}</p>{resultFilter !== 'all' && <button type="button" onClick={() => setResultFilter('all')} className="mt-4 text-label-md text-primary hover:underline">Показать все позиции</button>}</div>}
+            {!visibleItems.length && <div className="rounded-xl border border-dashed border-outline-variant bg-surface-container-lowest px-5 py-10 text-center"><span aria-hidden="true" className="material-symbols-outlined text-[30px] text-on-surface-variant">filter_list_off</span><p className="mt-2 text-body-md font-semibold text-on-surface">{items.length ? resultFilter === 'combined' ? 'Подтверждённых предложений по всем условиям пока нет' : 'В этом разделе пока нет позиций' : 'В документе не найдены позиции товаров'}</p><p className="mx-auto mt-1 max-w-md text-body-sm text-on-surface-variant">{items.length ? activeSearch ? 'Поиск продолжается. Новые результаты появятся автоматически.' : resultFilter === 'combined' ? matchedItems ? 'Найденные кандидаты сохранены. Ниже показано, какие подтверждения ещё отсутствуют.' : 'Подтверждённых товарных страниц с нужными сведениями пока нет. Откройте все позиции и повторите поиск.' : 'Выберите другой фильтр, чтобы посмотреть результаты проверки.' : 'Проверьте, что документ содержит названия товаров и требования к ним, и загрузите спецификацию снова.'}</p>{resultFilter === 'combined' && combinedGaps.length > 0 && <ul className="mx-auto mt-4 max-w-xl space-y-2 text-left text-body-sm text-on-surface-variant">{combinedGaps.map((gap) => <li key={gap.code} className="flex items-start gap-2"><span aria-hidden="true" className="material-symbols-outlined mt-0.5 text-[16px] text-amber-600">info</span><span>{gap.label}</span></li>)}</ul>}{resultFilter !== 'all' && <button type="button" onClick={() => setResultFilter('all')} className="mt-4 text-label-md text-primary hover:underline">Показать все позиции и причины</button>}</div>}
             {visibleItems.map(({ item, index }) => (
               <article key={`${item.source_section || item.product_name}-${index}`} className="overflow-hidden rounded-2xl border border-outline-variant bg-surface-container-lowest shadow-sm">
                 <div className="flex flex-wrap items-start justify-between gap-3 p-4 md:p-5">
@@ -570,6 +576,14 @@ export default function QuickCheckPage() {
                   </div>
                   <div className="flex flex-col items-start gap-2 sm:items-end">
                     <span className="rounded-lg bg-surface-container-low px-3 py-2 text-label-md text-on-surface">По ТЗ: {requiredAmount(item)}</span>
+                    {supportsClosureClarification(item) && <div className="w-full max-w-sm rounded-lg border border-outline-variant bg-surface-container-low/50 p-3 text-left">
+                      <label htmlFor={`closure-policy-${parsed.id}-${index}`} className="mb-1.5 block text-label-sm font-medium text-on-surface">Допустимая застёжка</label>
+                      <select id={`closure-policy-${parsed.id}-${index}`} value={item.closure_policy ?? 'source'} disabled={busy || activeSearch || item.state === 'searching'} aria-describedby={`closure-policy-help-${parsed.id}-${index}`} onChange={(event) => setItems((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, closure_policy: event.target.value as ClosurePolicy } : row))} className="min-h-10 w-full rounded-lg border border-outline-variant bg-surface-container-lowest px-2 py-2 text-body-sm text-on-surface focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/15 disabled:opacity-60">
+                        {(Object.entries(CLOSURE_POLICY_LABELS) as [ClosurePolicy, string][]).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                      </select>
+                      <p id={`closure-policy-help-${parsed.id}-${index}`} className="mt-2 text-label-sm leading-relaxed text-on-surface-variant">Уточнение применяется при повторном поиске; исходное ТЗ не меняется.</p>
+                      {(item.closure_policy ?? 'source') !== (parsed.items[index]?.closure_policy ?? 'source') && <p className="mt-1 text-label-sm font-medium text-primary">Выбрано для следующего поиска</p>}
+                    </div>}
                     {item.checked_at && item.state === 'ready' && <span className="text-label-sm text-on-surface-variant">Проверено {formatDate(item.checked_at)}</span>}
                     {item.state !== 'searching' && !['queued', 'running'].includes(parsed.processing_state) && <button type="button" disabled={busy} onClick={() => void retry(index)} className="inline-flex items-center gap-1 text-label-sm text-primary hover:underline disabled:opacity-50"><span className="material-symbols-outlined text-[16px]">{item.state === 'pending' ? 'search' : 'refresh'}</span>{item.state === 'pending' ? 'Найти товары' : 'Повторить поиск'}</button>}
                   </div>

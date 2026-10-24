@@ -6,7 +6,7 @@ import ts from 'typescript';
 const { outputText } = ts.transpileModule(readFileSync(new URL('../src/lib/productDiscovery.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 });
-const { canRecommendProductLead, canonicalProductUrl, hasConfirmedProductRequirements, isCompleteProductLead, isMatchingInStockLead, isVerifiedProductLead, productVerificationScope, quickCheckProgressLabel, visibleProductLeads, reportItemHasProductCards, reportItemMatchesFilter, publishedProductPhones, productDiscoveryCsv } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
+const { CLOSURE_POLICY_LABELS, canRecommendProductLead, canonicalProductUrl, hasConfirmedProductRequirements, isCompleteProductLead, isConfirmedProductOffer, isMatchingInStockLead, isVerifiedProductLead, productConfirmationGaps, productQuantityMessage, productVerificationScope, quickCheckProgressLabel, visibleProductLeads, reportConfirmationGaps, reportItemHasProductCards, reportItemMatchesFilter, supportsClosureClarification, publishedProductPhones, productDiscoveryCsv } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
 
 const candidate = {
   title: 'ДЕМО QA — кандидат товара', url: 'https://supplier.example.test/products/qa',
@@ -231,4 +231,63 @@ test('combined filter rejects stock-only, partial-spec, unknown-certificate and 
     assert.equal(reportItemMatchesFilter(item([excluded]), 'combined'), false);
     assert.equal(visibleProductLeads([excluded], 'combined').length, 0);
   }
+});
+
+test('strict-offer gaps identify missing published fields without weakening confirmed technical checks', () => {
+  const lead = { ...verified, match_status: 'matched', checks: verified.checks.map((check) => ({ ...check, status: 'matched' })), seller_phone: null, availability: null };
+  const gaps = productConfirmationGaps(lead);
+  assert.deepEqual(gaps.map((gap) => gap.code), ['availability', 'photo', 'price', 'contact']);
+  assert.equal(isConfirmedProductOffer(lead), false);
+  assert.equal(hasConfirmedProductRequirements(lead), true);
+});
+
+test('strict-offer gaps retain the actual unknown and mismatched requirements', () => {
+  const lead = { ...verified, checks: [verified.checks[0], { id: 'certificate', requirement: 'Сертификат соответствия', status: 'unknown' }, { id: 'power', requirement: 'Мощность не менее 10 Вт', status: 'mismatch' }] };
+  const gaps = productConfirmationGaps(lead);
+  assert.deepEqual(gaps.find((gap) => gap.code === 'requirements-unknown').requirements, ['Сертификат соответствия']);
+  assert.deepEqual(gaps.find((gap) => gap.code === 'requirements-mismatch').requirements, ['Мощность не менее 10 Вт']);
+  assert.equal(isConfirmedProductOffer(lead), false);
+});
+
+test('a confirmed published offer still explicitly declares unknown order quantity', () => {
+  const lead = { ...verified, match_status: 'matched', checks: verified.checks.map((check) => ({ ...check, status: 'matched' })), availability: 'InStock', image_url: 'https://supplier.example.test/product-photo.jpg', price: 12000, currency: 'KZT', stock_quantity: null };
+  assert.equal(isConfirmedProductOffer(lead), true);
+  assert.deepEqual(productConfirmationGaps(lead), []);
+  assert.match(productQuantityMessage(20, 'шт.', 'unknown'), /Количество по заказу \(20 шт\.\) не подтверждено/);
+  assert.doesNotMatch(productQuantityMessage(20, 'шт.', 'unknown'), /Хватает|подтверждены/);
+  assert.equal(productQuantityMessage(20, 'шт.', 'enough'), null);
+  assert.match(productQuantityMessage(null, 'шт.', 'unknown'), /Количество в ТЗ не указано/);
+});
+
+test('strict empty-state reasons use only actual ready product cards and do not inflate duplicate gaps', () => {
+  const ready = item([candidate, { ...candidate, url: 'https://other.example.test/products/qa' }, searchLink]);
+  const gaps = reportConfirmationGaps([ready, item([verified], 'searching')]);
+  assert.equal(gaps.filter((gap) => gap.code === 'page').length, 1);
+  assert.equal(gaps.filter((gap) => gap.code === 'requirements-unchecked').length, 1);
+  assert.equal(gaps.some((gap) => gap.code === 'requirements-missing'), false, 'an unread page does not prove that extraction missed the specification');
+  assert.deepEqual(reportConfirmationGaps([item([searchLink]), item([], 'error')]), []);
+  const typeOnly = { ...verified, match_status: 'matched', checks: [verified.checks[0]] };
+  assert.ok(productConfirmationGaps(typeOnly).some((gap) => gap.code === 'requirements-missing'));
+});
+
+test('closure clarification is offered for garments requiring a fastening, not unrelated locks or unspecified clothing', () => {
+  assert.equal(supportsClosureClarification({ product_name: 'Кофта на замке' }), true);
+  assert.equal(supportsClosureClarification({ product_name: 'Кардиган', specs: 'Застёжка на молнии' }), true);
+  assert.equal(supportsClosureClarification({ product_name: 'Замок навесной' }), false);
+  assert.equal(supportsClosureClarification({ product_name: 'Рюкзак на молнии' }), false);
+  assert.equal(supportsClosureClarification({ product_name: 'Кофта шерстяная' }), false);
+});
+
+test('CSV carries the saved per-item closure policy without inventing a global approval', () => {
+  const source = item([candidate]);
+  const approved = { ...item([verified]), closure_policy: 'allow_alternatives' };
+  const csv = productDiscoveryCsv('ДЕМО QA.pdf', [source, approved]);
+  assert.match(csv, /Уточнение застёжки для выполненного поиска/);
+  assert.ok(csv.includes(CLOSURE_POLICY_LABELS.source));
+  assert.ok(csv.includes(CLOSURE_POLICY_LABELS.allow_alternatives));
+  assert.equal(source.closure_policy, undefined);
+  assert.equal(approved.closure_policy, 'allow_alternatives');
+  const strict = productDiscoveryCsv('ДЕМО QA.pdf', [{ ...source, closure_policy: 'zipper_only' }]);
+  assert.ok(strict.includes(CLOSURE_POLICY_LABELS.zipper_only));
+  assert.equal(strict.includes(CLOSURE_POLICY_LABELS.allow_alternatives), false);
 });

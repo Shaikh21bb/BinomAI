@@ -229,7 +229,9 @@ def _extract_language_blocks(text: str, fields: Dict[str, tuple[str, ...]]) -> L
         if quantity is None:
             continue
         seen_numbers.add(item_number)
-        spec_parts = [values.get("requirements")]
+        # The short name must not erase the lot description (e.g. casual knitwear).
+        spec_parts = [values.get("description") if values.get("short_description") else None,
+                      values.get("requirements")]
         if values.get("delivery_location"):
             spec_parts.append(f"Место поставки: {values['delivery_location']}")
         if values.get("delivery_terms"):

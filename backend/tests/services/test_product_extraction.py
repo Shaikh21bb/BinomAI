@@ -23,6 +23,8 @@ def test_goszakup_lot_pdf_layout_preserves_quantity_and_prefers_russian():
     assert products[0]["unit"] == "Штука"
     assert products[0]["source_section"] == "Лот № 80000001-ОИ2"
     assert "ГОСТ 25295-2003" in products[0]["specs"]
+    assert "повседневный" in products[0]["specs"]
+    assert "из трикотажа" in products[0]["specs"]
     assert "Место поставки: Тестовый город" in products[0]["specs"]
 
 

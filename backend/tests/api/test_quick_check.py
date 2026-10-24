@@ -341,6 +341,82 @@ async def test_saved_search_updates_only_owned_report(authenticated_user, monkey
 
 
 @pytest.mark.asyncio
+async def test_owned_closure_clarification_is_applied_and_saved_without_rewriting_pdf_specs(authenticated_user, monkeypatch):
+    user, db = authenticated_user
+    specs = "Жакет женский шерстяной. Застежка — молния, пуговица; ГОСТ 25295-2003"
+    report = QuickCheckReport(id=uuid.uuid4(), company_id=user.company_id, created_by=user.id,
+        filename="spec.pdf", page_count=2, ocr_pages=0, total_items=1, truncated=False,
+        processing_state="completed", items=[{"product_name": "Жакет женский на замке", "specs": specs, "state": "ready", "results": []}])
+    db.execute.return_value = scalar_first(report)
+    async def search_after_releasing_connection(*args, **kwargs):
+        db.commit.assert_awaited_once()
+        return []
+    search = AsyncMock(side_effect=search_after_releasing_connection)
+    evaluate = AsyncMock(return_value=[])
+    monkeypatch.setattr(quick_check, "search_products", search)
+    monkeypatch.setattr(quick_check, "evaluate_product_leads", evaluate)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/quick-check/search", json={
+            "product_name": report.items[0]["product_name"], "specs": "подмена исходного текста",
+            "report_id": str(report.id), "item_index": 0, "closure_policy": "allow_alternatives"})
+    assert response.status_code == 200
+    assert response.json()["closure_policy"] == "allow_alternatives"
+    assert report.items[0]["closure_policy"] == "allow_alternatives"
+    assert report.items[0]["specs"] == specs
+    assert report.items[0]["product_name"] == "Жакет женский на замке"
+    assert search.await_args.kwargs == {"specs": specs, "closure_policy": "allow_alternatives"}
+    assert evaluate.await_args.kwargs == {"closure_policy": "allow_alternatives"}
+    assert db.execute.call_args_list[-1].args[0].get_execution_options()["populate_existing"] is True
+    for call in db.execute.call_args_list:
+        params = call.args[0].compile().params.values()
+        assert user.company_id in params and user.id in params
+
+
+@pytest.mark.asyncio
+async def test_closure_clarification_needs_saved_owned_report_and_valid_enum(authenticated_user, monkeypatch):
+    _, db = authenticated_user
+    search = AsyncMock()
+    monkeypatch.setattr(quick_check, "search_products", search)
+    db.execute.return_value = scalar_first(None)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for payload, expected in [
+            ({"closure_policy": "allow_alternatives"}, 422),
+            ({"closure_policy": "ignore_all_requirements", "report_id": str(uuid.uuid4()), "item_index": 0}, 422),
+            ({"closure_policy": "allow_alternatives", "report_id": str(uuid.uuid4()), "item_index": 0}, 404),
+        ]:
+            response = await client.post("/api/v1/quick-check/search", json={"product_name": "Жакет женский", **payload})
+            assert response.status_code == expected
+    search.assert_not_awaited()
+
+
+def test_only_saved_report_reruns_preserve_user_clarifications_not_new_parses():
+    item = {"product_name": "Жакет", "specs": "Шерсть", "closure_policy": "allow_alternatives"}
+    assert "closure_policy" not in quick_check._fresh_items([item])[0]
+    assert quick_check._fresh_items([item], preserve_clarifications=True)[0]["closure_policy"] == "allow_alternatives"
+    assert "closure_policy" not in quick_check._fresh_items([{**item, "closure_policy": "ignore_gost"}], preserve_clarifications=True)[0]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_clarification_cannot_be_overwritten_by_stale_search(authenticated_user, monkeypatch):
+    user, db = authenticated_user
+    report = QuickCheckReport(id=uuid.uuid4(), company_id=user.company_id, created_by=user.id,
+        filename="spec.pdf", page_count=2, ocr_pages=0, total_items=1, truncated=False,
+        processing_state="completed", items=[{"product_name": "Жакет женский на замке", "specs": "Шерсть", "state": "ready", "results": []}])
+    db.execute.return_value = scalar_first(report)
+    async def other_request_finishes(*args, **kwargs):
+        report.items = [{**report.items[0], "closure_policy": "zipper_only", "results": [{"title": "Новый результат"}]}]
+        return []
+    monkeypatch.setattr(quick_check, "search_products", other_request_finishes)
+    monkeypatch.setattr(quick_check, "evaluate_product_leads", AsyncMock(return_value=[]))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/quick-check/search", json={"product_name": "Жакет женский на замке",
+            "report_id": str(report.id), "item_index": 0, "closure_policy": "allow_alternatives"})
+    assert response.status_code == 409
+    assert report.items[0]["closure_policy"] == "zipper_only"
+    assert report.items[0]["results"] == [{"title": "Новый результат"}]
+
+
+@pytest.mark.asyncio
 async def test_report_history_is_scoped_to_user_and_company(authenticated_user):
     user, db = authenticated_user
     timestamp = datetime.now(timezone.utc)

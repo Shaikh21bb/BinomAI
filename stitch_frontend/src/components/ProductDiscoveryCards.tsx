@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import Image, { type ImageLoaderProps } from 'next/image';
 import { assessStock, displayUnit } from '@/lib/productStock';
-import { canRecommendProductLead, canonicalProductUrl, hasProductPhoto, isProductCardLead, isVerifiedProductLead, productVerificationScope, publishedProductPhones, visibleProductLeads, type DiscoveryLead, type ProductLeadFilter } from '@/lib/productDiscovery';
+import { canRecommendProductLead, canonicalProductUrl, hasProductPhoto, isConfirmedProductOffer, isProductCardLead, isVerifiedProductLead, productConfirmationGaps, productQuantityMessage, productVerificationScope, publishedProductPhones, visibleProductLeads, type DiscoveryLead, type ProductLeadFilter } from '@/lib/productDiscovery';
 
 export { isProductCardLead, isVerifiedProductLead, productLeadScore } from '@/lib/productDiscovery';
 export type { DiscoveryCheck, DiscoveryLead } from '@/lib/productDiscovery';
@@ -161,6 +161,8 @@ function ProductCard({
   );
   const seller = lead.seller_name || lead.shop || 'Продавец не указан';
   const sellerPhones = publishedProductPhones(lead);
+  const confirmationGaps = productConfirmationGaps(lead);
+  const quantityMessage = productQuantityMessage(requestedQuantity, displayUnit(requestedUnit), stockAssessment.verdict);
 
   return (
     <article className="flex h-full flex-col gap-3 rounded-2xl border border-outline-variant bg-surface-container-lowest p-4 shadow-sm transition-shadow hover:shadow-md">
@@ -234,12 +236,16 @@ function ProductCard({
             ? 'Хватает на весь заказ'
             : stockAssessment.verdict === 'shortage'
               ? `Не хватает ${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(stockAssessment.missing ?? 0)} ${displayUnit(requestedUnit)}`
-              : 'Достаточность для заказа не подтверждена'}
+              : quantityMessage}
         </p>
       )}
       <p className="text-label-sm text-on-surface-variant">
         {verification.explanation || (checks.length ? `По ТЗ подтверждено ${confirmed} из ${checks.length} выделенных требований` : 'Характеристики кандидата ещё не подтверждены')}
       </p>
+      {confirmationGaps.length > 0 && <details className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-3 text-body-sm">
+        <summary className="cursor-pointer font-medium text-on-surface">Почему карточка пока не подтверждена ({confirmationGaps.length})</summary>
+        <ul className="mt-2 space-y-2 text-on-surface-variant">{confirmationGaps.map((gap) => <li key={gap.code}><p>{gap.label}</p>{gap.requirements?.length ? <ul className="mt-1 list-disc space-y-1 pl-4 text-label-sm">{gap.requirements.map((requirement, index) => <li key={index} className="break-words">{requirement}</li>)}</ul> : null}</li>)}</ul>
+      </details>}
       {!!checks.length && (
         <details className="rounded-xl bg-surface-container-low p-3 text-body-sm open:pb-4">
           <summary className="cursor-pointer font-medium text-on-surface">
@@ -317,7 +323,8 @@ export function ProductDiscoveryCards({
   leadFilter = 'all',
 }: Props) {
   const products = visibleProductLeads(leads, leadFilter);
-  const readProducts = products.filter((lead) => lead.page_verified);
+  const confirmedProducts = products.filter(isConfirmedProductOffer);
+  const readProducts = products.filter((lead) => lead.page_verified && !isConfirmedProductOffer(lead));
   const unverifiedProducts = products.filter((lead) => !lead.page_verified);
   const confirmedTypes = products.filter(isVerifiedProductLead).length;
   const searchLinks = [...new Map(leads.filter((lead) => !isProductCardLead(lead) && canonicalProductUrl(lead.url)).map((lead) => [canonicalProductUrl(lead.url), lead])).values()].slice(0, 6);
@@ -354,7 +361,8 @@ export function ProductDiscoveryCards({
       </div>
       {products.length ? (
         <div className="space-y-5">
-          {readProducts.length > 0 && <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{readProducts.map(renderCard)}</div>}
+          {confirmedProducts.length > 0 && <section className="rounded-xl border border-emerald-500/25 bg-emerald-500/5 p-3 md:p-4" aria-label="Подтверждено по выделенным требованиям и наличию"><h5 className="text-body-md font-semibold text-on-surface">Подтверждено по выделенным требованиям и наличию · {confirmedProducts.length}</h5><p className="mb-4 mt-1 text-body-sm text-on-surface-variant">Есть фото, цена и телефон. Достаточность количества для вашего заказа проверяется отдельно в каждой карточке.</p><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{confirmedProducts.map(renderCard)}</div></section>}
+          {readProducts.length > 0 && <section aria-label="Кандидаты с прочитанными страницами"><h5 className="mb-1 text-body-md font-semibold text-on-surface">Кандидаты: требуется подтверждение · {readProducts.length}</h5><p className="mb-4 text-body-sm text-on-surface-variant">Смотрите причину в карточке: требования, наличие или сведения продавца ещё не полностью подтверждены.</p><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{readProducts.map(renderCard)}</div></section>}
           {unverifiedProducts.length > 0 && <section className="rounded-xl border border-dashed border-outline-variant bg-surface-container-low/30 p-3 md:p-4" aria-label="Кандидаты без проверки страницы">
             <h5 className="text-body-md font-semibold text-on-surface">Кандидаты без проверки страницы · {unverifiedProducts.length}</h5>
             <p className="mb-4 mt-1 text-body-sm text-on-surface-variant">Ссылка на товар найдена, но страницу не удалось прочитать. Наличие, цена и соответствие ТЗ требуют проверки у продавца.</p>

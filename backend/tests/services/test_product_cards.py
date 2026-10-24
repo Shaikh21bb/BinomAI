@@ -36,6 +36,78 @@ def test_concrete_product_page_extracts_real_photo_specs_and_price():
     assert page["price"] == 1250
 
 
+def test_scoped_main_product_description_and_attribute_rows_supply_real_requirements():
+    markup = _markup({"@type": "Product", "name": "Шерстяной жакет", "description": "Купить онлайн"}, "Шерстяной жакет").replace(
+        "</body>", '''
+        <h1>Шерстяной жакет</h1>
+        <div class="ItemDescription-module__abc__root">
+          <h3>Описание</h3><p>Однобортный жакет из костюмной шерсти. Застёжка на пуговицах. Два кармана с клапанами.</p>
+          <div class="ItemDescription-module__abc__attrRow"><p class="ItemDescription-module__abc__attrLabel">Пол</p><p class="ItemDescription-module__abc__attrValue">женщины</p></div>
+          <div class="ItemDescription-module__abc__attrRow"><p class="ItemDescription-module__abc__attrLabel">Материал</p><p class="ItemDescription-module__abc__attrValue"><span>Шерсть</span></p></div>
+          <div class="ItemDescription-module__abc__attrRow"><p class="ItemDescription-module__abc__attrLabel">Состав</p><p class="ItemDescription-module__abc__attrValue">Шерсть100%</p></div>
+          <h3>Доставка и возврат</h3><p>Пример товара для обмена: ГОСТ 25295-2003. Плотная вязка.</p>
+        </div>
+        <section class="recommendations"><div class="ItemDescription-module__abc__root"><p>Длинный рукав. Плотная вязка. ГОСТ 25295-2003</p>
+          <div class="ItemDescription-module__abc__attrRow"><p class="ItemDescription-module__abc__attrLabel">Застёжка</p><p class="ItemDescription-module__abc__attrValue">Молния</p></div></div></section>
+        </body>''',
+    )
+    page = parse_product_page(markup, "https://fashion.example.kz/item/123")
+    assert page["characteristics"] == {"Пол": "женщины", "Материал": "Шерсть", "Состав": "Шерсть100%"}
+    assert "Застёжка на пуговицах" in page["description"]
+    assert "Купить онлайн" not in page["description"]
+    assert "Доставка и возврат" not in page["description"]
+    assert not any(term in page["evidence_text"] for term in ("Длинный рукав", "ГОСТ", "Плотная вязка", "Молния"))
+
+
+def test_product_details_ignore_preheading_navigation_and_unscoped_attributes():
+    markup = _markup({"@type": "Product", "name": "Жакет", "description": "Описание основного товара"}, "Жакет").replace(
+        "</body>", '''<nav><div class="product-description">ГОСТ 25295-2003</div></nav>
+        <h1>Жакет</h1><div class="attrRow"><p class="attrLabel">Пол</p><p class="attrValue">женский</p></div>
+        <div class="product-description"><p>Основной товар: карманы отсутствуют.</p></div></body>''',
+    )
+    page = parse_product_page(markup, "https://fashion.example.kz/item/123")
+    assert "карманы отсутствуют" in page["description"]
+    assert not page["characteristics"]
+    assert "ГОСТ" not in page["evidence_text"]
+
+
+def test_related_product_tables_cannot_supply_main_product_certification_or_material():
+    markup = _markup({"@type": "Product", "name": "Жакет"}, "Жакет").replace(
+        "</body>", '''<h1>Жакет</h1><table><tr><td>Материал</td><td>Хлопок</td></tr></table>
+        <section class="related products"><h1>Жакет женский</h1><table>
+        <tr><td>Материал</td><td>Шерсть</td></tr><tr><td>ГОСТ</td><td>25295-2003</td></tr>
+        </table></section></body>''',
+    )
+    page = parse_product_page(markup, "https://fashion.example.kz/item/123")
+    assert page["characteristics"] == {"Материал": "Хлопок"}
+    assert "ГОСТ" not in page["evidence_text"]
+
+
+@pytest.mark.parametrize("context", ['id="recommendations"', 'data-testid="related-products"'])
+def test_recommendation_identifiers_exclude_both_table_and_component_evidence(context):
+    markup = _markup({"@type": "Product", "name": "Жакет"}, "Жакет").replace(
+        "</body>", f'''<h1>Жакет</h1><section {context}>
+        <table><tr><td>Сертификат</td><td>ГОСТ 25295-2003</td></tr></table>
+        <div class="product-description"><p>ГОСТ 25295-2003</p></div></section></body>''',
+    )
+    page = parse_product_page(markup, "https://fashion.example.kz/item/123")
+    assert "ГОСТ" not in page["evidence_text"]
+    assert not page["characteristics"]
+
+
+def test_delivery_sections_cannot_supply_certificates_via_tables_or_attribute_rows():
+    markup = _markup({"@type": "Product", "name": "Жакет"}, "Жакет").replace(
+        "</body>", '''<h1>Жакет</h1><div class="product-description"><h3>Описание</h3><p>Основной жакет</p>
+        <h3>Характеристики</h3><div class="attrRow"><p class="attrLabel">Материал</p><p class="attrValue">Шерсть</p></div>
+        <h3>Доставка и возврат</h3><p>Пример другого товара для обмена:</p>
+        <div class="attrRow"><p class="attrLabel">Сертификат</p><p class="attrValue">ГОСТ 25295-2003</p></div>
+        <table><tr><td>Сертификат</td><td>ГОСТ 25295-2003</td></tr></table></div></body>''',
+    )
+    page = parse_product_page(markup, "https://fashion.example.kz/item/123")
+    assert page["characteristics"] == {"Материал": "Шерсть"}
+    assert "ГОСТ" not in page["evidence_text"]
+
+
 def test_main_woocommerce_price_and_stock_do_not_leak_from_cart_or_related_products():
     page = parse_product_page('''
         <title>Пылесос Philips FC9734/01</title>
