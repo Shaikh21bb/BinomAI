@@ -9,6 +9,7 @@ from app.services.market_search import (
     _primary_query,
     _relevant_candidates,
     _relevant_result,
+    _search_queries,
     _unique_results,
     search_products,
 )
@@ -55,6 +56,109 @@ def test_model_search_does_not_replace_requested_suffix_with_another_model():
     assert [row["url"] for row in _matching_models(results, "Philips FC9734/01")] == [
         "https://shop.example.kz/product/2", "https://shop.example.kz/p/philips-fc9734-01-violet/",
     ]
+
+
+def test_query_variants_use_only_supplied_characteristics_and_stay_bounded():
+    variants = _search_queries(
+        "Жакет женский на замке из плотной вязки",
+        "Жакет шерстяной; Горловина круглая. Место поставки: улица5, дом40; 2100Вт",
+    )
+    assert "Жакет женский" in variants
+    assert 2 <= len(variants) <= 3
+    assert any("шерстяной" in query for query in variants)
+    assert "шерстяной" in variants[0]
+    assert not any("2100" in query or "дом40" in query or "Philips" in query for query in variants)
+    assert len(_search_queries("Philips FC9734/01", "Мощность2100 Вт")) <= 3
+
+
+@pytest.mark.parametrize("availability,verified", [(None, False), ("OutOfStock", True)])
+@pytest.mark.asyncio
+async def test_six_unusable_cards_do_not_stop_further_queries(monkeypatch, availability, verified):
+    from app.core.config import settings
+    from app.services import market_search
+
+    queries = []
+    reads = []
+
+    async def search(query, *_args):
+        queries.append(query)
+        if len(queries) == 1:
+            return [{"title": "Philips FC9734/01", "url": f"https://shop.example.kz/product/unusable-{n}"} for n in range(6)]
+        return [{"title": "Philips FC9734/01", "url": "https://store.example.kz/product/available"}]
+
+    async def enrich(rows):
+        reads.extend(row["url"] for row in rows)
+        return [{**row, "is_product_page": True, "page_verified": True if "available" in row["url"] else verified,
+                 "availability": "InStock" if "available" in row["url"] else availability,
+                 "image_url": "https://images.example.kz/photo.jpg", "price": 178490,
+                 "seller_phone": "+77001112233"} for row in rows]
+
+    async def no_results(*_args):
+        return []
+
+    monkeypatch.setattr(settings, "GOOGLE_CSE_API_KEY", None)
+    monkeypatch.setattr(market_search, "_duckduckgo", search)
+    monkeypatch.setattr(market_search, "_satu_search", no_results)
+    monkeypatch.setattr(market_search, "enrich_product_pages", enrich)
+    rows = await search_products("Philips FC9734/01", specs="Мощность2100 Вт")
+
+    assert len(queries) >= 2
+    assert rows[0]["url"] == "https://store.example.kz/product/available"
+    assert len(reads) == len(set(reads))
+    assert len(reads) <= 24
+
+
+@pytest.mark.asyncio
+async def test_search_crawl_budget_is_shared_across_all_queries(monkeypatch):
+    from app.core.config import settings
+    from app.services import market_search
+
+    reads = []
+    batch = 0
+
+    async def search(*_args):
+        nonlocal batch
+        batch += 1
+        return [{"title": "Philips FC9734/01", "url": f"https://shop.example.kz/product/{batch}-{n}"} for n in range(20)]
+
+    async def enrich(rows):
+        reads.extend(row["url"] for row in rows)
+        return [{**row, "is_product_page": True, "page_verified": False} for row in rows]
+
+    monkeypatch.setattr(settings, "GOOGLE_CSE_API_KEY", "test")
+    monkeypatch.setattr(settings, "GOOGLE_CSE_ID", "test")
+    monkeypatch.setattr(market_search, "_google_cse", search)
+    monkeypatch.setattr(market_search, "_duckduckgo", search)
+    monkeypatch.setattr(market_search, "_satu_search", search)
+    monkeypatch.setattr(market_search, "enrich_product_pages", enrich)
+    await search_products("Philips FC9734/01", specs="Мощность2100 Вт")
+    assert len(reads) == 24
+    assert len(set(reads)) == 24
+
+
+def test_grounded_same_vendor_product_dedup_preserves_variants_and_other_stores():
+    rows = [
+        {"url": "https://store.example.kz/old-path?utm_source=google", "page_verified": True,
+         "is_product_page": True, "product_sku": "sku1", "availability": "OutOfStock"},
+        {"url": "https://store.example.kz/product/new-path", "page_verified": True,
+         "is_product_page": True, "product_sku": "sku1", "availability": "InStock"},
+        {"url": "https://another.example.kz/product/new-path", "page_verified": True,
+         "is_product_page": True, "product_sku": "sku1", "availability": "InStock"},
+        {"url": "https://store.example.kz/product/new-path?size=44", "page_verified": True,
+         "is_product_page": True, "product_sku": "sku1", "availability": "InStock"},
+    ]
+    unique = _unique_results(rows)
+    assert len(unique) == 3
+    assert unique[0]["availability"] == "InStock"
+    assert len(_unique_results([
+        {"url": "https://store.example.kz/alias", "page_verified": True, "canonical_url": "https://store.example.kz/product/main"},
+        {"url": "https://store.example.kz/product/main", "page_verified": True},
+    ])) == 1
+
+
+def test_localized_international_store_is_eligible_without_loosening_type_gate():
+    assert _relevant_result({"title": "Жакет женский", "url": "https://shop.example.com/kz/ru/p/123"}, "Жакет женский")
+    assert not _relevant_result({"title": "Корм для животных", "url": "https://shop.example.com/kz/ru/p/123"}, "Жакет женский")
 
 
 def test_repeat_blocked_result_does_not_replace_already_verified_card():

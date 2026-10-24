@@ -282,8 +282,8 @@ async def test_quick_parse_rejects_non_pdf(authenticated_user):
 async def test_quick_search_returns_checked_cards(authenticated_user, monkeypatch):
     seen = []
 
-    async def search(query):
-        seen.append(query)
+    async def search(query, *, specs=None):
+        seen.append((query, specs))
         return [{"url": "https://shop.example.kz/p/gel-500", "is_product_page": True}]
 
     async def evaluate(name, specs, rows):
@@ -299,6 +299,7 @@ async def test_quick_search_returns_checked_cards(authenticated_user, monkeypatc
         )
     assert response.status_code == 200
     assert response.json()["results"][0]["match_status"] == "partial"
+    assert seen[0][1] == "Жидкое"
     assert seen[1] == ("Средство для посуды 500 мл", "Жидкое")
 
 
@@ -313,7 +314,8 @@ async def test_saved_search_updates_only_owned_report(authenticated_user, monkey
     )
     db.execute.return_value = scalar_first(report)
 
-    async def search(_):
+    async def search(_, *, specs=None):
+        assert specs == "Жидкое"
         return [{"url": "https://shop.example.kz/p/gel-500"}]
 
     async def evaluate(*_):
@@ -324,7 +326,7 @@ async def test_saved_search_updates_only_owned_report(authenticated_user, monkey
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             "/api/v1/quick-check/search",
-            json={"product_name": "Средство для посуды 500 мл", "specs": "Жидкое",
+            json={"product_name": "Средство для посуды 500 мл", "specs": "Подменённое клиентом ТЗ",
                   "report_id": str(report.id), "item_index": 0},
         )
     assert response.status_code == 200

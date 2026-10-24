@@ -36,6 +36,58 @@ def test_concrete_product_page_extracts_real_photo_specs_and_price():
     assert page["price"] == 1250
 
 
+def test_main_woocommerce_price_and_stock_do_not_leak_from_cart_or_related_products():
+    page = parse_product_page('''
+        <title>Пылесос Philips FC9734/01</title>
+        <header><p class="price">0 ₸</p></header>
+        <div data-elementor-type="product" class="product type-product instock">
+          <h1 class="product_title">Пылесос Philips FC9734/01</h1>
+          <img src="/vacuum.jpg" alt="Пылесос Philips FC9734/01">
+          <div data-widget_type="woocommerce-product-price.default"><p class="price">
+            <del>199 990 ₸</del><ins>178 490&nbsp;₸</ins></p></div>
+          <span class="sku">FC9734/01</span>
+          <section class="related products"><p class="stock out-of-stock">Нет в наличии</p><p class="price">25 190 ₸</p></section>
+        </div>
+    ''', "https://vendor.example.kz/shop/philips-fc9734-01/")
+    assert page["price"] == 178490
+    assert page["currency"] == "KZT"
+    assert page["availability"] == "InStock"
+    assert page["stock_quantity"] is None
+    assert page["product_sku"] == "FC9734/01"
+
+
+def test_related_instock_and_buy_button_cannot_override_main_outofstock_or_unknown():
+    markup = '''
+        <title>Пылесос Philips FC9734/01</title>
+        <div class="product type-product outofstock">
+          <h1 class="product_title">Пылесос Philips FC9734/01</h1><img src="/vacuum.jpg">
+          <p class="price">178 490 ₸</p><button>Купить</button>
+          <ul><li class="product type-product instock"><p class="price">25 000 ₸</p></li></ul>
+        </div>
+    '''
+    page = parse_product_page(markup, "https://vendor.example.kz/shop/philips-fc9734-01/")
+    assert page["availability"] == "OutOfStock"
+    assert page["stock_quantity"] is None
+    assert page["price"] == 178490
+    unknown = parse_product_page(markup.replace("type-product outofstock", "type-product"), "https://vendor.example.kz/shop/philips-fc9734-01/")
+    assert unknown["availability"] is None
+
+
+@pytest.mark.parametrize("price,expected", [("178\u00a0490", 178490), ("178\u202f490,50", 178490.5), ("NaN", None), ("Infinity", None), ("-5", None)])
+def test_published_prices_handle_unicode_spacing_without_nonfinite_or_negative_values(price, expected):
+    page = parse_product_page(_markup({"@type": "Product", "name": "Пылесос Philips FC9734/01", "offers": {"price": price, "priceCurrency": "KZT"}}, "Пылесос Philips FC9734/01"), "https://vendor.example.kz/p/philips-fc9734-01")
+    assert page["price"] == expected
+
+
+def test_visible_negative_stock_wins_over_stale_structured_positive_stock():
+    markup = _markup({"@type": "Product", "name": "Пылесос Philips FC9734/01", "offers": {"availability": "https://schema.org/InStock"}}, "Пылесос Philips FC9734/01").replace(
+        "</body>", '<div class="product type-product outofstock"><h1 class="product_title">Пылесос Philips FC9734/01</h1><p class="stock">Нет в наличии</p></div></body>',
+    )
+    page = parse_product_page(markup, "https://vendor.example.kz/p/philips-fc9734-01")
+    assert page["availability"] == "OutOfStock"
+    assert page["stock_quantity"] is None
+
+
 @pytest.mark.parametrize(
     "page_url",
     [
@@ -69,6 +121,20 @@ def test_plain_catalog_category_is_not_promoted_to_product_card():
         "https://shop.example.kz/catalog/krovlya/",
     )
     assert page["is_product_page"] is False
+
+
+@pytest.mark.parametrize("url", [
+    "https://www.flip.kz/catalog?subsection=7989",
+    "https://www.olx.kz/moda-i-stil/zhenskaya-odezhda/zhenskie-pidzhaki-zhakety/q-жакет/",
+])
+def test_collection_embedded_product_price_and_stock_are_not_a_concrete_item(url):
+    page = parse_product_page(_markup({
+        "@type": "Product", "name": "Женские пиджаки и жакеты", "image": "https://images.example.kz/jacket.jpg",
+        "offers": {"price": "700", "priceCurrency": "KZT", "availability": "https://schema.org/InStock"},
+    }, "Женские пиджаки и жакеты"), url)
+    assert page["is_product_page"] is False
+    assert "price" not in page
+    assert "availability" not in page
 
 
 def test_published_inventory_count_is_separate_from_availability():

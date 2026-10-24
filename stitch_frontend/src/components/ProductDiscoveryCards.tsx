@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import Image, { type ImageLoaderProps } from 'next/image';
 import { assessStock, displayUnit } from '@/lib/productStock';
-import { canRecommendProductLead, isProductCardLead, isVerifiedProductLead, productVerificationScope, publishedProductPhones, visibleProductLeads, type DiscoveryLead } from '@/lib/productDiscovery';
+import { canRecommendProductLead, canonicalProductUrl, hasProductPhoto, isProductCardLead, isVerifiedProductLead, productVerificationScope, publishedProductPhones, visibleProductLeads, type DiscoveryLead, type ProductLeadFilter } from '@/lib/productDiscovery';
 
 export { isProductCardLead, isVerifiedProductLead, productLeadScore } from '@/lib/productDiscovery';
 export type { DiscoveryCheck, DiscoveryLead } from '@/lib/productDiscovery';
@@ -17,6 +17,7 @@ interface Props {
   addingUrl?: string | null;
   disabled?: boolean;
   onAddOffer?: (lead: DiscoveryLead) => void | Promise<void>;
+  leadFilter?: ProductLeadFilter;
 }
 
 export function isAutoComparableLead(
@@ -69,14 +70,12 @@ const checkColors = {
 };
 const emptyOfferUrls: string[] = [];
 
-const imageNoise = /favicon|logo|sprite|placeholder|\/watch\/|portal-portable|base_satu|pixel/i;
-
 function directImageLoader({ src }: ImageLoaderProps) {
   return src;
 }
 
 function ProductPhoto({ src, name }: { src?: string | null; name: string }) {
-  const imageUrl = src && /^https?:\/\//i.test(src) && !imageNoise.test(src) ? src : null;
+  const imageUrl = hasProductPhoto({ page_verified: true, image_url: src }) ? src : null;
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
   const failed = imageUrl != null && imageUrl === failedSrc;
   return (
@@ -129,31 +128,36 @@ function ProductCard({
   );
   const confirmed = checks.filter((check) => check.status === 'matched').length;
   const verification = productVerificationScope(lead);
-  const tone = tones[lead.match_status ?? 'unknown'];
+  const tone = tones[lead.page_verified ? lead.match_status ?? 'unknown' : 'unverified'];
   const name = lead.title || 'Товар без названия';
   const price =
-    lead.price != null && lead.currency
+    lead.page_verified && lead.price != null && lead.currency
       ? `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(lead.price)} ${lead.currency === 'KZT' ? '₸' : lead.currency}`
       : null;
-  const stock =
-    lead.stock_quantity != null
+  const stock = !lead.page_verified
+    ? 'Наличие не подтверждено: страница не прочитана'
+    : lead.availability === 'InStock' && lead.stock_quantity === 0
+      ? 'Данные о наличии противоречивы — уточните у продавца'
+    : lead.availability === 'OutOfStock'
+      ? 'Нет в наличии'
+    : lead.stock_quantity != null
       ? lead.stock_quantity > 0
         ? `В наличии: ${new Intl.NumberFormat('ru-RU').format(lead.stock_quantity)} ${lead.stock_unit || 'ед.'}`
         : 'Нет в наличии'
       : lead.availability === 'InStock'
-        ? 'В наличии · точный остаток не указан'
+        ? 'По странице: в наличии · количество не указано'
         : lead.availability === 'OutOfStock'
           ? 'Нет в наличии'
           : 'Остаток не опубликован';
   const stockAssessment = assessStock(
     requestedQuantity,
     requestedUnit,
-    lead.stock_quantity,
-    lead.stock_unit,
-    lead.availability
+    lead.page_verified ? lead.stock_quantity : null,
+    lead.page_verified ? lead.stock_unit : null,
+    lead.page_verified ? lead.availability : null
   );
   const canAdd = Boolean(
-    onAddOffer && lead.url && lead.price != null && Number.isFinite(Number(lead.price))
+    onAddOffer && lead.page_verified && lead.url && lead.price != null && Number.isFinite(Number(lead.price)) && Number(lead.price) > 0
   );
   const seller = lead.seller_name || lead.shop || 'Продавец не указан';
   const sellerPhones = publishedProductPhones(lead);
@@ -166,7 +170,7 @@ function ProductCard({
           совпадение
         </span>
       )}
-      <ProductPhoto key={lead.image_url || name} src={lead.image_url} name={name} />
+      <ProductPhoto key={lead.image_url || name} src={lead.page_verified ? lead.image_url : null} name={name} />
       <div className="flex flex-wrap items-center justify-between gap-2 text-label-sm text-on-surface-variant">
         <span className="inline-flex items-center gap-1">
           <span className="material-symbols-outlined text-[15px]">storefront</span>
@@ -184,7 +188,7 @@ function ProductCard({
           <div className="mt-1.5 flex items-start gap-1.5">
             <span className="material-symbols-outlined mt-0.5 text-[16px]">call</span>
             <span>
-              <span className="font-medium text-on-surface">Телефон на странице источника:</span>{' '}
+              <span className="font-medium text-on-surface">{lead.page_verified ? 'Телефон на странице источника:' : 'Контакт источника — проверьте:'}</span>{' '}
               {sellerPhones.map((phone, index) => (
                 <span key={phone}>
                   {index > 0 && ' · '}
@@ -310,11 +314,27 @@ export function ProductDiscoveryCards({
   addingUrl = null,
   disabled = false,
   onAddOffer,
+  leadFilter = 'all',
 }: Props) {
-  const products = visibleProductLeads(leads);
+  const products = visibleProductLeads(leads, leadFilter);
+  const readProducts = products.filter((lead) => lead.page_verified);
+  const unverifiedProducts = products.filter((lead) => !lead.page_verified);
   const confirmedTypes = products.filter(isVerifiedProductLead).length;
-  const searchLinks = leads.filter((lead) => !isProductCardLead(lead) && lead.url).slice(0, 6);
+  const searchLinks = [...new Map(leads.filter((lead) => !isProductCardLead(lead) && canonicalProductUrl(lead.url)).map((lead) => [canonicalProductUrl(lead.url), lead])).values()].slice(0, 6);
   const existingUrls = new Set(existingOfferUrls);
+  const renderCard = (lead: DiscoveryLead) => (
+    <ProductCard
+      key={lead.url}
+      lead={lead}
+      requestedQuantity={requestedQuantity}
+      requestedUnit={requestedUnit}
+      recommended={lead === products[0] && canRecommendProductLead(lead)}
+      added={Boolean(lead.url && existingUrls.has(lead.url))}
+      adding={Boolean(lead.url && addingUrl === lead.url)}
+      disabled={disabled}
+      onAddOffer={onAddOffer}
+    />
+  );
 
   return (
     <div className="border-t border-outline-variant px-4 py-5 md:px-5">
@@ -333,25 +353,17 @@ export function ProductDiscoveryCards({
         </span>
       </div>
       {products.length ? (
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {products.map((lead, index) => (
-            <ProductCard
-              key={`${lead.url}-${index}`}
-              lead={lead}
-              requestedQuantity={requestedQuantity}
-              requestedUnit={requestedUnit}
-              recommended={index === 0 && canRecommendProductLead(lead)}
-              added={Boolean(lead.url && existingUrls.has(lead.url))}
-              adding={Boolean(lead.url && addingUrl === lead.url)}
-              disabled={disabled}
-              onAddOffer={onAddOffer}
-            />
-          ))}
+        <div className="space-y-5">
+          {readProducts.length > 0 && <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{readProducts.map(renderCard)}</div>}
+          {unverifiedProducts.length > 0 && <section className="rounded-xl border border-dashed border-outline-variant bg-surface-container-low/30 p-3 md:p-4" aria-label="Кандидаты без проверки страницы">
+            <h5 className="text-body-md font-semibold text-on-surface">Кандидаты без проверки страницы · {unverifiedProducts.length}</h5>
+            <p className="mb-4 mt-1 text-body-sm text-on-surface-variant">Ссылка на товар найдена, но страницу не удалось прочитать. Наличие, цена и соответствие ТЗ требуют проверки у продавца.</p>
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{unverifiedProducts.map(renderCard)}</div>
+          </section>}
         </div>
       ) : (
         <p className="rounded-xl bg-surface-container-low px-4 py-3 text-body-sm text-on-surface-variant">
-          Конкретную товарную ссылку пока не удалось найти. Нажмите «Повторить поиск» у позиции
-          или откройте поиск у продавца ниже.
+          {leadFilter === 'all' ? 'Конкретную товарную ссылку пока не удалось найти. Нажмите «Повторить поиск» у позиции или откройте поиск у продавца ниже.' : 'Нет карточек с выбранными условиями. Измените фильтр или повторите поиск.'}
         </p>
       )}
       {!!searchLinks.length && (

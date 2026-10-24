@@ -387,7 +387,7 @@ async def search_quick_product(
         name, specs = item["product_name"], item.get("specs")
 
     query = _build_search_query(name, specs)
-    results = await search_products(query)
+    results = await search_products(query, specs=specs)
     checked = jsonable_encoder((await evaluate_product_leads(name, specs, results))[:16])
     checked_at = datetime.now(timezone.utc).isoformat()
 

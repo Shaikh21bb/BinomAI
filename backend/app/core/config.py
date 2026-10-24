@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     # App Settings
     APP_NAME: str = "BINOM AI"
     APP_ENV: str = "development"
-    APP_VERSION: str = "1.5.2"
+    APP_VERSION: str = "1.6.0"
     DEBUG: bool = False
 
     # Supabase Settings

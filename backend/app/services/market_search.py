@@ -5,7 +5,7 @@ from html.parser import HTMLParser
 import structlog
 import httpx
 from typing import List, Dict, Any, Optional
-from urllib.parse import parse_qs, quote, urljoin, urlparse, unquote
+from urllib.parse import parse_qs, parse_qsl, quote, urljoin, urlparse, unquote
 
 from app.core.config import settings
 from app.services.product_identity import contains_model, model_identifiers
@@ -17,6 +17,9 @@ _TYPE_STOP_WORDS = {
     "для", "товар", "изделие", "средство", "моющее", "жидкое", "жидкий", "купить", "цена",
     "женский", "женская", "женское", "мужской", "мужская", "детский", "детская", "шт", "штук",
 }
+_MAX_PAGE_READS = 24
+_MAX_QUERY_VARIANTS = 3
+_COMPLETE_IN_STOCK_TARGET = 3
 
 
 def _word_stem(word: str) -> str:
@@ -44,6 +47,51 @@ def _primary_query(query: str) -> str:
     return short if len(short.split()) >= 2 else query
 
 
+def _search_queries(query: str, specs: str | None = None) -> list[str]:
+    """Use only supplied product characteristics; never invent brands or equivalents."""
+    primary = _primary_query(query)
+    supplied = " ".join([query, specs or ""])
+    supplied = re.split(r"(?:Место|Срок|Адрес|Условия)\s+поставки\s*:", supplied, maxsplit=1, flags=re.I)[0]
+    qualifiers = list(dict.fromkeys(re.findall(
+        r"\bна\s+(?:молнии|замке)\b|(?:плотн\w*\s+)?вязк\w*|трикотаж\w*|шерст\w*|"
+        r"(?<![a-z0-9])\d+(?:[,.]\d+)?\s*(?:мл|кг|мм|см|кВт|Вт|литр\w*|дюйм\w*)(?!\w)",
+        supplied, re.I,
+    )))[:4]
+    options = [primary]
+    if query != primary:
+        options.append(query)
+    if qualifiers:
+        qualified = f"{primary} {' '.join(qualifiers)}"
+        if specs:
+            options.insert(0, qualified)
+        else:
+            options.append(qualified)
+    options.append(f"{primary} в наличии")
+    unique: dict[str, str] = {}
+    for option in options:
+        value = " ".join(option.split())[:150]
+        unique.setdefault(value.casefold(), value)
+    return list(unique.values())[:_MAX_QUERY_VARIANTS]
+
+
+def _result_quality(row: Dict[str, Any]) -> tuple:
+    verified = bool(row.get("is_product_page") and row.get("page_verified"))
+    stock_priority = {"InStock": 5, "LimitedAvailability": 4, None: 3, "PreOrder": 2, "BackOrder": 2, "OutOfStock": 1, "SoldOut": 1, "Discontinued": 0}
+    return (
+        verified,
+        stock_priority.get(row.get("availability"), 3) if verified else -1,
+        sum(bool(row.get(key)) for key in ("image_url", "price", "seller_phone")),
+    )
+
+
+def _complete_in_stock(results: List[Dict[str, Any]]) -> int:
+    return sum(
+        bool(row.get("is_product_page") and row.get("page_verified") and row.get("availability") == "InStock"
+             and row.get("image_url") and row.get("price") and row.get("seller_phone"))
+        for row in results
+    )
+
+
 def _relevant_candidates(results: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
     if model_identifiers(query):
         return _matching_models(results, query)
@@ -60,15 +108,33 @@ MARKETPLACES = [
 ]
 
 
-async def search_products(query: str, region: Optional[str] = None) -> List[Dict[str, Any]]:
+async def search_products(query: str, region: Optional[str] = None, *, specs: str | None = None) -> List[Dict[str, Any]]:
     """
     Search the web for a product by name + specs, optionally scoped to a region.
     Priority: Google CSE (if configured) -> DuckDuckGo -> marketplace links fallback.
     Product pages are read for characteristics and a real product photo.
     """
     results: List[Dict[str, Any]] = []
+    visited: set[tuple] = set()
+    queries = _search_queries(query, specs)
+    primary_query = queries[0]
 
-    primary_query = _primary_query(query)
+    async def consume(batch: List[Dict[str, Any]]) -> None:
+        nonlocal results
+        candidates = []
+        relevant = _unique_results(_relevant_candidates(batch, query))
+        for row in sorted(relevant, key=lambda row: not looks_like_product_url(row.get("url") or "")):
+            key = _url_identity(row.get("url") or "")
+            if key in visited or len(visited) >= _MAX_PAGE_READS:
+                continue
+            visited.add(key)
+            candidates.append(row)
+            if len(candidates) >= 8:
+                break
+        if candidates:
+            enriched = _relevant_candidates(await enrich_product_pages(candidates), query)
+            results = _unique_results(results + enriched)
+
     q = primary_query
     if region:
         q = f"{primary_query} купить {region}"
@@ -77,26 +143,23 @@ async def search_products(query: str, region: Optional[str] = None) -> List[Dict
         if settings.GOOGLE_CSE_API_KEY and settings.GOOGLE_CSE_ID:
             google_results = await _google_cse(q, region)
             if google_results:
-                results = _relevant_candidates(await enrich_product_pages(_relevant_candidates(google_results, query)[:8]), query)
-                if sum(bool(row.get("is_product_page")) for row in results) >= 6:
-                    return results
+                await consume(google_results)
     except Exception as e:
         logger.warning("google_cse_search_failed", error=str(e)[:200])
 
-    try:
-        ddg = await _duckduckgo(primary_query, region)
-        filtered = _relevant_candidates(ddg, query)
-        if filtered:
-            enriched = _relevant_candidates(await enrich_product_pages(filtered[:8]), query)
-            results = _unique_results(results + enriched)
-            if sum(bool(row.get("is_product_page")) for row in results) >= 6:
-                return results
-    except Exception as e:
-        logger.warning("duckduckgo_search_failed", error=str(e)[:200])
+    for search_query in queries:
+        if _complete_in_stock(results) >= _COMPLETE_IN_STOCK_TARGET or len(visited) >= _MAX_PAGE_READS:
+            break
+        try:
+            await consume(await _duckduckgo(search_query, region))
+        except Exception as e:
+            logger.warning("duckduckgo_search_failed", error_type=type(e).__name__)
 
     # Long tender prose can make generic web search return categories. A short
     # marketplace product-page query gives concrete items to inspect.
     try:
+        if _complete_in_stock(results) >= _COMPLETE_IN_STOCK_TARGET or len(visited) >= _MAX_PAGE_READS:
+            return sorted(results, key=_result_quality, reverse=True)[:12]
         marketplace_query = re.sub(r"моющее средство для посуды", "средство для мытья посуды", primary_query, flags=re.I)
         short_query = marketplace_query.split(";")[0][:85]
         targeted_batches = await asyncio.gather(
@@ -105,19 +168,19 @@ async def search_products(query: str, region: Optional[str] = None) -> List[Dict
             _duckduckgo(f"{short_query} site:satu.kz/p", None),
             return_exceptions=True,
         )
-        concrete_urls = _unique_results([
+        concrete_urls = [
             row
             for batch in targeted_batches
             if isinstance(batch, list)
             for row in batch
             if looks_like_product_url(row.get("url") or "")
-        ])
-        candidates = _relevant_candidates(await enrich_product_pages(_relevant_candidates(concrete_urls, query)[:8]), query)
-        results = _unique_results(candidates + results)
+        ]
+        await consume(concrete_urls)
     except Exception as e:
         logger.warning("targeted_product_search_failed", error_type=type(e).__name__)
 
     # Search pages remain discoverable links, not concrete product cards.
+    results = sorted(results, key=_result_quality, reverse=True)
     return results[:12] if any(row.get("is_product_page") for row in results) else results[:10] + _marketplace_links(query, region)
 
 
@@ -162,16 +225,42 @@ async def _satu_search(query: str, region: Optional[str]) -> List[Dict[str, Any]
         return _satu_product_results(response.text[:1_200_000], region)
 
 
+def _url_identity(url: str) -> tuple:
+    parsed = urlparse(url)
+    query = tuple(sorted((key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                         if not key.casefold().startswith("utm_") and key.casefold() not in {"gclid", "fbclid", "yclid"}))
+    return (parsed.hostname or "").removeprefix("www."), parsed.path.rstrip("/"), query
+
+
+def _result_identity(row: Dict[str, Any]) -> tuple:
+    url = row.get("url") or ""
+    host, path, query = _url_identity(url)
+    if row.get("page_verified"):
+        if row.get("product_sku"):
+            return host, "sku", str(row["product_sku"]), query
+        canonical = row.get("canonical_url")
+        if canonical and not query and _url_identity(canonical)[0] == host:
+            return _url_identity(canonical)
+    return host, path, query
+
+
 def _unique_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    unique: dict[str, Dict[str, Any]] = {}
+    unique: dict[tuple, Dict[str, Any]] = {}
+    by_url: dict[tuple, Dict[str, Any]] = {}
     for row in results:
+        url = row.get("url") or ""
+        key = _url_identity(url)
+        if url and (key not in by_url or _result_quality(row) > _result_quality(by_url[key])):
+            by_url[key] = row
+    for row in by_url.values():
         url = row.get("url") or ""
         if not url:
             continue
-        previous = unique.get(url)
+        key = _result_identity(row)
+        previous = unique.get(key)
         # A blocked repeat lookup must not overwrite a page already read in this run.
-        if previous is None or (row.get("page_verified") and not previous.get("page_verified")):
-            unique[url] = row
+        if previous is None or _result_quality(row) > _result_quality(previous):
+            unique[key] = row
     return list(unique.values())
 
 
@@ -410,4 +499,5 @@ def _relevant_result(match: Dict[str, Any], query: str) -> bool:
     if "женск" in query.casefold() and re.search(r"\b(?:мужск|детск|мальчик|девочк)", title):
         return False
     host = (urlparse(match.get("url") or "").hostname or "").casefold()
-    return host.endswith(".kz") or host in {"kaspi.kz", "satu.kz", "wildberries.ru"}
+    locale_path = bool(re.match(r"^/kz(?:/|_|$)", urlparse(match.get("url") or "").path, re.I))
+    return host.endswith(".kz") or host in {"kaspi.kz", "satu.kz", "wildberries.ru"} or locale_path

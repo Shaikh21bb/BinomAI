@@ -115,7 +115,7 @@ async def run_quick_check_async(report_id_str: str, run_id_str: str) -> dict:
             continue
         name, specs = claim
         try:
-            results = await search_products(_build_search_query(name, specs))
+            results = await search_products(_build_search_query(name, specs), specs=specs)
             checked = jsonable_encoder((await evaluate_product_leads(name, specs, results))[:16])
         except Exception as exc:
             logger.warning("quick_check_item_failed", report_id=str(report_id), index=index, error_type=type(exc).__name__)

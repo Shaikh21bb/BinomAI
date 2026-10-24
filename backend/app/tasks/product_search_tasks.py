@@ -153,7 +153,7 @@ async def run_product_search_async(task, project_id_str: str) -> dict:
         for ps in stored:
             try:
                 query = _build_search_query(ps.product_name, ps.specs)
-                results = await search_products(query, region)
+                results = await search_products(query, region, specs=ps.specs)
                 # A search engine can return only category links on a repeat
                 # run. Recheck previously discovered product URLs before
                 # replacing useful cards with a weaker search result.

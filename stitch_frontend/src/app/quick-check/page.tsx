@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, type DragEvent, type FormEvent } from 'rea
 import Link from 'next/link';
 import { AppShell } from '@/components/AppShell';
 import { ProductDiscoveryCards, isVerifiedProductLead, type DiscoveryLead } from '@/components/ProductDiscoveryCards';
-import { productDiscoveryCsv, reportItemHasProductCards, visibleProductLeads } from '@/lib/productDiscovery';
+import { productDiscoveryCsv, quickCheckProgressLabel, reportItemHasProductCards, reportItemMatchesFilter, visibleProductLeads, type DiscoveryResultFilter } from '@/lib/productDiscovery';
 import { api, errorMessage } from '@/lib/api';
 import { assessStock, displayUnit } from '@/lib/productStock';
 
@@ -104,8 +104,6 @@ function reportStatus(state: ParsedPdf['processing_state']) {
   return 'Ожидает проверки';
 }
 
-type ResultFilter = 'all' | 'with-cards' | 'without-cards' | 'error';
-
 export default function QuickCheckPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const resultsRef = useRef<HTMLElement>(null);
@@ -128,10 +126,12 @@ export default function QuickCheckPage() {
   const [deletingReportId, setDeletingReportId] = useState<string | null>(null);
   const [openingReportId, setOpeningReportId] = useState<string | null>(null);
   const [historyQuery, setHistoryQuery] = useState('');
-  const [resultFilter, setResultFilter] = useState<ResultFilter>('all');
+  const [resultFilter, setResultFilter] = useState<DiscoveryResultFilter>('all');
+  const [retryingIndex, setRetryingIndex] = useState<number | null>(null);
+  const [retryNotice, setRetryNotice] = useState('');
   const [pollError, setPollError] = useState(false);
   const [lastPollAt, setLastPollAt] = useState(() => Date.now());
-  const busy = rerunningReport || runningReport || phase === 'parsing' || (phase === 'searching' && !['queued', 'running'].includes(parsed?.processing_state ?? ''));
+  const busy = retryingIndex != null || rerunningReport || runningReport || phase === 'parsing' || (phase === 'searching' && !['queued', 'running'].includes(parsed?.processing_state ?? ''));
   const completed = items.filter((item) => item.state === 'ready').length;
   const activeReportId = parsed?.id;
   const activeReportState = parsed?.processing_state;
@@ -142,12 +142,14 @@ export default function QuickCheckPage() {
   const progress = items.length ? Math.round(((completed + failed) / items.length) * 100) : 0;
   const matchedItems = items.filter(reportItemHasProductCards).length;
   const withoutCards = items.filter((item) => item.state === 'ready' && !reportItemHasProductCards(item)).length;
+  const inStockItems = items.filter((item) => reportItemMatchesFilter(item, 'in-stock')).length;
+  const completeItems = items.filter((item) => reportItemMatchesFilter(item, 'complete')).length;
+  const requirementsItems = items.filter((item) => reportItemMatchesFilter(item, 'requirements')).length;
+  const combinedItems = items.filter((item) => reportItemMatchesFilter(item, 'combined')).length;
+  const leadFilter = resultFilter === 'in-stock' || resultFilter === 'complete' || resultFilter === 'requirements' || resultFilter === 'combined' ? resultFilter : 'all';
   const filteredHistory = history.filter((report) => report.filename.toLocaleLowerCase('ru-RU').includes(historyQuery.trim().toLocaleLowerCase('ru-RU')));
-  const visibleItems = items.map((item, index) => ({ item, index })).filter(({ item }) => {
-    if (resultFilter === 'with-cards') return reportItemHasProductCards(item);
-    if (resultFilter === 'without-cards') return item.state === 'ready' && !reportItemHasProductCards(item);
-    if (resultFilter === 'error') return item.state === 'error';
-    return true;
+  const visibleItems = items.map((item, index) => ({ item, index })).filter(({ item, index }) => {
+    return reportItemMatchesFilter(item, resultFilter, index === retryingIndex);
   });
 
   async function refreshHistory() {
@@ -232,6 +234,7 @@ export default function QuickCheckPage() {
       const document: ParsedPdf = await api.get(`/quick-check/reports/${id}`);
       setParsed(document);
       setReusedReport(false);
+      setRetryNotice('');
       setResultFilter('all');
       setPollError(false);
       setItems(document.items.map((item) => ({ ...item, results: item.results ?? [] })));
@@ -318,6 +321,9 @@ export default function QuickCheckPage() {
 
   async function retry(index: number) {
     if (busy || !items[index] || !parsed || ['queued', 'running'].includes(parsed.processing_state)) return;
+    setRetryingIndex(index);
+    setRetryNotice('');
+    setError('');
     setPhase('searching');
     try {
       const succeeded = await searchOne(items[index], index, parsed.id);
@@ -325,11 +331,16 @@ export default function QuickCheckPage() {
         const updated: ParsedPdf = await api.get(`/quick-check/reports/${parsed.id}`);
         setParsed(updated);
         setItems(updated.items.map((item) => ({ ...item, results: item.results ?? [] })));
+        const cards = visibleProductLeads(updated.items[index]?.results ?? []).length;
+        setRetryNotice(`Повторный поиск позиции ${index + 1} завершён. Найдено карточек: ${cards}.`);
+      } else {
+        setRetryNotice(`Не удалось повторить поиск позиции ${index + 1}. Откройте «Все позиции», чтобы увидеть ошибку и попробовать снова.`);
       }
       await refreshHistory();
     } catch (refreshError) {
       setError(errorMessage(refreshError, 'Результат сохранён, но не удалось обновить экран'));
     } finally {
+      setRetryingIndex(null);
       setPhase('done');
     }
   }
@@ -337,6 +348,7 @@ export default function QuickCheckPage() {
   async function checkRemaining(report: ParsedPdf) {
     if (busy || (['queued', 'running'].includes(report.processing_state) && !staleSearch)) return;
     setRunningReport(true);
+    setRetryNotice('');
     setError('');
     try {
       const updated: ParsedPdf = await api.post(`/quick-check/reports/${report.id}/run`, {});
@@ -355,6 +367,7 @@ export default function QuickCheckPage() {
   async function rerunReport(report: ParsedPdf) {
     if (busy || ['queued', 'running'].includes(report.processing_state)) return;
     setRerunningReport(true);
+    setRetryNotice('');
     setResultFilter('all');
     setError('');
     try {
@@ -384,6 +397,7 @@ export default function QuickCheckPage() {
     setError('');
     setParsed(null);
     setReusedReport(false);
+    setRetryNotice('');
     setResultFilter('all');
     setPollError(false);
     setItems([]);
@@ -410,7 +424,7 @@ export default function QuickCheckPage() {
     for (const lead of relevant) {
       total.cards += 1;
       if (isVerifiedProductLead(lead)) total.confirmedTypes += 1;
-      const assessment = assessStock(item.quantity, item.unit, lead.stock_quantity, lead.stock_unit, lead.availability);
+      const assessment = assessStock(item.quantity, item.unit, lead.page_verified ? lead.stock_quantity : null, lead.page_verified ? lead.stock_unit : null, lead.page_verified ? lead.availability : null);
       total[assessment.verdict] += 1;
     }
     return total;
@@ -504,14 +518,14 @@ export default function QuickCheckPage() {
             {reusedReport && <p role="status" className="rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-body-sm text-on-surface">Этот документ уже есть в истории: открыта проверка от {formatDate(parsed.created_at)} без повторной обработки файла. {activeSearch ? 'Поиск ещё идёт в фоне.' : 'Для свежих данных нажмите «Проверить заново» — предыдущий результат останется в истории.'}</p>}
             <div className="rounded-xl border border-outline-variant bg-surface-container-lowest p-4 md:p-5">
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-3"><span aria-hidden="true" className={`material-symbols-outlined text-[23px] ${activeSearch ? 'animate-spin text-primary' : failed ? 'text-error' : 'text-primary'}`}>{activeSearch ? 'progress_activity' : failed ? 'error' : 'task_alt'}</span><div><p aria-live="polite" className="text-body-md font-semibold text-on-surface">{activeSearch ? parsed.processing_state === 'queued' ? 'Документ в очереди на поиск' : 'Ищем товары и сверяем требования' : failed ? 'Проверка требует внимания' : completed === items.length ? 'Проверка завершена' : 'Проверка готова к запуску'}</p><p className="mt-1 text-body-sm text-on-surface-variant">Проверено {completed} из {items.length}{failed ? ` · с ошибкой: ${failed}` : ''}{activeSearch ? '. Прогресс сохраняется, страницу можно закрыть.' : ` · позиций с карточками: ${matchedItems}`}</p></div></div>
+                <div className="flex items-center gap-3"><span aria-hidden="true" className={`material-symbols-outlined text-[23px] ${activeSearch || retryingIndex != null ? 'animate-spin text-primary' : failed ? 'text-error' : 'text-primary'}`}>{activeSearch || retryingIndex != null ? 'progress_activity' : failed ? 'error' : 'task_alt'}</span><div><p aria-live="polite" className="text-body-md font-semibold text-on-surface">{quickCheckProgressLabel(parsed.processing_state, retryingIndex, completed, items.length, failed)}</p><p className="mt-1 text-body-sm text-on-surface-variant">{retryingIndex != null ? `Обновляем позицию ${retryingIndex + 1}. Дождитесь завершения поиска.` : <>Проверено {completed} из {items.length}{failed ? ` · с ошибкой: ${failed}` : ''}{activeSearch ? '. Прогресс сохраняется, страницу можно закрыть.' : ` · позиций с карточками: ${matchedItems}`}</>}</p></div></div>
                 <span className="font-mono-sm text-[20px] font-semibold tabular-nums text-on-surface">{progress}%</span>
               </div>
               <div role="progressbar" aria-label="Обработка позиций документа" aria-valuemin={0} aria-valuemax={items.length || 1} aria-valuenow={completed + failed} aria-valuetext={`Проверено ${completed} из ${items.length}${failed ? `, с ошибкой ${failed}` : ''}`} className="mt-4 h-1.5 overflow-hidden rounded-full bg-surface-container-high"><div className={`h-full rounded-full transition-[width] duration-500 ${failed ? 'bg-error' : 'bg-primary'}`} style={{ width: `${progress}%` }} /></div>
               {pollError && <p role="status" className="mt-3 flex items-center gap-2 text-body-sm text-on-surface-variant"><span aria-hidden="true" className="material-symbols-outlined text-[17px]">cloud_off</span>Не удаётся обновить прогресс. Повторяем запрос автоматически; сохранённые результаты доступны в истории.</p>}
             </div>
             {staleSearch && <p role="status" className="rounded-xl bg-amber-50 px-4 py-3 text-body-sm text-amber-900">Прогресс давно не обновлялся. Нажмите «Возобновить проверку», чтобы продолжить с сохранённого места.</p>}
-            {parsed.processing_state === 'error' && <p role="alert" className="rounded-xl bg-error-container px-4 py-3 text-body-sm text-on-error-container">Поиск прервался. Уже найденные товары сохранены; нажмите «Проверить оставшиеся», чтобы продолжить.</p>}
+            {parsed.processing_state === 'error' && retryingIndex == null && <p role="alert" className="rounded-xl bg-error-container px-4 py-3 text-body-sm text-on-error-container">Поиск прервался. Уже найденные товары сохранены; нажмите «Проверить оставшиеся», чтобы продолжить.</p>}
             {parsed.truncated && <p className="rounded-lg bg-amber-50 p-3 text-body-sm text-amber-900">Для быстрой проверки взяты первые 20 позиций документа.</p>}
             {parsed.ocr_pages > 0 && <p className="rounded-lg bg-amber-50 p-3 text-body-sm text-amber-900">Распознано страниц скана: {parsed.ocr_pages}. Проверьте названия, количество и характеристики: распознавание может допускать ошибки.</p>}
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -532,10 +546,19 @@ export default function QuickCheckPage() {
               {([
                 { id: 'all', label: 'Все позиции', count: items.length },
                 { id: 'with-cards', label: 'С карточками', count: matchedItems },
+                { id: 'requirements', label: 'ТЗ подтверждено', count: requirementsItems },
+                { id: 'combined', label: 'ТЗ + наличие + контакты', count: combinedItems },
+                { id: 'in-stock', label: 'В наличии', count: inStockItems },
+                { id: 'complete', label: 'С фото, ценой и контактом', count: completeItems },
                 { id: 'without-cards', label: 'Без карточек', count: withoutCards },
                 { id: 'error', label: 'Ошибки', count: failed },
               ] as const).map((filter) => <button key={filter.id} type="button" aria-pressed={resultFilter === filter.id} onClick={() => setResultFilter(filter.id)} className={`inline-flex min-h-10 items-center gap-2 rounded-lg px-3 py-2 text-label-sm transition-colors ${resultFilter === filter.id ? 'bg-primary text-on-primary' : 'bg-surface-container-lowest text-on-surface-variant hover:bg-surface-container'}`}>{filter.label}<span className={`rounded px-1.5 py-0.5 tabular-nums ${resultFilter === filter.id ? 'bg-on-primary/15' : 'bg-surface-container'}`}>{filter.count}</span></button>)}
             </div>
+            {resultFilter === 'in-stock' && <p className="text-body-sm text-on-surface-variant">Показаны прочитанные товарные страницы с подтверждённым типом и опубликованной отметкой «В наличии». Достаточность количества для заказа проверяется отдельно.</p>}
+            {resultFilter === 'complete' && <p className="text-body-sm text-on-surface-variant">Есть фото товара, положительная цена с валютой и опубликованный телефон. Эти сведения не подтверждают наличие или полное соответствие ТЗ.</p>}
+            {resultFilter === 'requirements' && <p className="text-body-sm text-on-surface-variant">Все выделенные требования к товару подтверждены сведениями с прочитанной страницы, включая хотя бы одну техническую характеристику. Сверьте полноту требований с исходным ТЗ; наличие и количество проверяются отдельно.</p>}
+            {resultFilter === 'combined' && <p className="text-body-sm text-on-surface-variant">Одновременно подтверждены все выделенные требования, на странице указано наличие, опубликованы фото, цена и телефон. Сверьте полноту требований с исходным ТЗ; достаточность количества и невыделенные документы или сертификаты ещё требуют проверки.</p>}
+            {retryNotice && <div role="status" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-body-sm text-on-surface"><p>{retryNotice}</p>{resultFilter !== 'all' && <button type="button" onClick={() => setResultFilter('all')} className="text-primary hover:underline">Показать все позиции</button>}</div>}
             {!visibleItems.length && <div className="rounded-xl border border-dashed border-outline-variant bg-surface-container-lowest px-5 py-10 text-center"><span aria-hidden="true" className="material-symbols-outlined text-[30px] text-on-surface-variant">filter_list_off</span><p className="mt-2 text-body-md font-semibold text-on-surface">{items.length ? 'В этом разделе пока нет позиций' : 'В документе не найдены позиции товаров'}</p><p className="mx-auto mt-1 max-w-md text-body-sm text-on-surface-variant">{items.length ? activeSearch ? 'Поиск продолжается. Новые результаты появятся автоматически.' : 'Выберите другой фильтр, чтобы посмотреть результаты проверки.' : 'Проверьте, что документ содержит названия товаров и требования к ним, и загрузите спецификацию снова.'}</p>{resultFilter !== 'all' && <button type="button" onClick={() => setResultFilter('all')} className="mt-4 text-label-md text-primary hover:underline">Показать все позиции</button>}</div>}
             {visibleItems.map(({ item, index }) => (
               <article key={`${item.source_section || item.product_name}-${index}`} className="overflow-hidden rounded-2xl border border-outline-variant bg-surface-container-lowest shadow-sm">
@@ -547,14 +570,14 @@ export default function QuickCheckPage() {
                   </div>
                   <div className="flex flex-col items-start gap-2 sm:items-end">
                     <span className="rounded-lg bg-surface-container-low px-3 py-2 text-label-md text-on-surface">По ТЗ: {requiredAmount(item)}</span>
-                    {item.checked_at && <span className="text-label-sm text-on-surface-variant">Проверено {formatDate(item.checked_at)}</span>}
+                    {item.checked_at && item.state === 'ready' && <span className="text-label-sm text-on-surface-variant">Проверено {formatDate(item.checked_at)}</span>}
                     {item.state !== 'searching' && !['queued', 'running'].includes(parsed.processing_state) && <button type="button" disabled={busy} onClick={() => void retry(index)} className="inline-flex items-center gap-1 text-label-sm text-primary hover:underline disabled:opacity-50"><span className="material-symbols-outlined text-[16px]">{item.state === 'pending' ? 'search' : 'refresh'}</span>{item.state === 'pending' ? 'Найти товары' : 'Повторить поиск'}</button>}
                   </div>
                 </div>
                 {item.state === 'ready' ? <>
-                  <ProductDiscoveryCards productName={item.product_name} leads={item.results} requestedQuantity={item.quantity} requestedUnit={item.unit} />
+                  <ProductDiscoveryCards productName={item.product_name} leads={item.results} requestedQuantity={item.quantity} requestedUnit={item.unit} leadFilter={leadFilter} />
                   {(() => {
-                    const best = item.results.find(isVerifiedProductLead);
+                    const best = visibleProductLeads(item.results, leadFilter).find(isVerifiedProductLead);
                     if (!best?.checks?.length) return null;
                     return <details className="group border-t border-outline-variant bg-surface-container-low px-4 py-4 md:px-5">
                       <summary className="cursor-pointer text-body-sm font-semibold text-on-surface">Доказательства по первому найденному товару <span className="ml-1 text-label-sm font-normal text-on-surface-variant">({best.checks.length})</span></summary>

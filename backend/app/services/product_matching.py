@@ -13,7 +13,7 @@ from app.services.product_identity import contains_model, model_identifiers
 
 logger = structlog.get_logger(__name__)
 
-_NUMBER_UNIT = re.compile(r"(?<!\w)(\d+(?:[,.]\d+)?)\s*(мл|ml|литр(?:а|ов)?|л|гр|г|кг|мм|см|м2|м3|%)(?!\w)", re.I)
+_NUMBER_UNIT = re.compile(r"(?<!\w)(\d+(?:[,.]\d+)?)\s*(квт|вт|kw|w|вольт|в|v|мл|ml|литр(?:а|ов)?|л|гр|г|кг|мм|см|м2|м3|%)(?!\w)", re.I)
 _LOGISTICS = ("место поставки", "срок поставки", "адрес поставки", "условия поставки")
 _GENERIC = {"средство", "моющее", "товар", "для", "жидкое", "изделие", "шт", "объем", "объём"}
 _NUMBER_CONTEXT_STOP = _GENERIC | {"менее", "более", "больше", "состав", "минимум", "максимум"}
@@ -23,6 +23,16 @@ _ACCESSORY = re.compile(
     r"картридж\w*|тонер\w*|адаптер\w*|кабел\w*|filter|accessor\w*|replacement\w*)\b",
     re.I,
 )
+_LOGISTICS_OR_BUYER_INSTRUCTION = re.compile(
+    r"\b(?:перед\s+поставкой|погруз\w*|разгруз\w*|поставщик\w*|заказчик\w*|согласова\w*|"
+    r"мест[ао]\s+поставки|срок\w*\s+поставки|адрес\w*\s+поставки|услови\w*\s+поставки|"
+    r"стоимост\w*\s+закупки|уважаем\w*|просим\s+вас|товар\s+не\s+принима\w*|"
+    r"цен\w*|остатк\w*|контакт\w*|телефон\w*|магазин\w*)\b|https?://|@",
+    re.I,
+)
+_STANDARD = re.compile(r"(?:СТ РК\s+)?ГОСТ\s+[А-ЯA-Z]?\s*\d+(?:-\d+)*", re.I)
+_CERTIFICATION = re.compile(r"ГОСТ|\bСТ\s+РК\b|сертификат|декларац", re.I)
+_GARMENT_CATEGORIES = ("жакет", "кардиган", "пиджак", "куртк", "рубашк", "джемпер", "брюк", "плать")
 
 
 def _norm(text: str) -> str:
@@ -37,6 +47,8 @@ def _measurements(text: str) -> list[tuple[Decimal, str]]:
         "гр": ("mass_g", 1), "г": ("mass_g", 1), "кг": ("mass_g", 1000),
         "мм": ("length_mm", 1), "см": ("length_mm", 10),
         "м2": ("area_m2", 1), "м3": ("volume_m3", 1), "%": ("percent", 1),
+        "вт": ("power_w", 1), "w": ("power_w", 1), "квт": ("power_w", 1000), "kw": ("power_w", 1000),
+        "в": ("voltage_v", 1), "v": ("voltage_v", 1), "вольт": ("voltage_v", 1),
     }
     return [
         (Decimal(value.replace(",", ".")) * multiplier, kind)
@@ -46,7 +58,7 @@ def _measurements(text: str) -> list[tuple[Decimal, str]]:
 
 
 def _number_context(requirement: str) -> list[str]:
-    units = {"мл", "ml", "литр", "литра", "литров", "гр", "г", "кг", "мм", "см"}
+    units = {"мл", "ml", "литр", "литра", "литров", "гр", "г", "кг", "мм", "см", "вт", "квт", "w", "kw", "в", "v", "вольт"}
     return [
         word[:5] for word in _norm(requirement).split()
         if len(word) >= 3 and not word.isdigit() and word not in units and word not in _NUMBER_CONTEXT_STOP
@@ -70,12 +82,25 @@ def _requirements(name: str, specs: str | None) -> list[dict[str, str]]:
         maxsplit=1,
         flags=re.I,
     )[0]
-    standards = re.findall(r"(?:СТ РК\s+)?ГОСТ\s+[А-ЯA-Z]?\s*\d+(?:-\d+)*", spec_text, flags=re.I)
-    spec_text = re.sub(r"(?:СТ РК\s+)?ГОСТ\s+[А-ЯA-Z]?\s*\d+(?:-\d+)*", "; ", spec_text, flags=re.I)
-    for chunk in re.split(r";|(?<=[.!?])\s+(?=[А-ЯЁA-Z])", spec_text):
-        if chunk.strip().casefold().startswith(_LOGISTICS):
+    standards = _STANDARD.findall(spec_text)
+    spec_text = _STANDARD.sub("; ", spec_text)
+    name_details = []
+    if any(re.search(rf"\b{category}\w*", name, re.I) for category in _GARMENT_CATEGORIES):
+        if re.search(r"на\s+(?:замке|молнии)", name, re.I):
+            name_details.append("Застежка: молния")
+        if re.search(r"плотн\w*\s+вязк\w*", name, re.I):
+            name_details.append("Плотная вязка")
+        if re.search(r"трикотаж", name, re.I):
+            name_details.append("Материал: трикотаж")
+        if re.search(r"шерст", name, re.I):
+            name_details.append("Материал: шерсть")
+    chunks = [*name_details, *re.split(r";|\n+|(?<=[.!?])\s+(?=[А-ЯЁA-Z])", spec_text)]
+    for chunk in chunks:
+        if chunk.strip().casefold().startswith(_LOGISTICS) or _LOGISTICS_OR_BUYER_INSTRUCTION.search(chunk):
             continue
-        for part in re.split(r"(?<!\d),(?!\d)\s*", chunk):
+        # Commas can list permitted alternatives (round or V neck, buttons or
+        # zipper). Split only when a new named characteristic starts.
+        for part in re.split(r",\s*(?=(?:мощность|объ[её]м|вес|масса|длина|ширина|высота|напряжение|[её]мкость|цвет|материал)\b)", chunk, flags=re.I):
             phrase = " ".join(part.split()).strip(" .,:—")
             if not phrase:
                 continue
@@ -102,32 +127,119 @@ def _source_quote(source: str, phrase: str) -> str:
     return ""
 
 
+def _evidence_segments(evidence: str) -> list[str]:
+    return [part.strip() for part in re.split(
+        r"[\n;|]|,\s*(?=(?:потребляемая\s+мощность|мощность|объ[её]м|вес|масса|напряжение)\b)",
+        evidence, flags=re.I,
+    ) if part.strip()]
+
+
+def _number_matches(required: Decimal, found: Decimal, requirement: str) -> bool:
+    if re.search(r"не\s+менее|минимум|минимальн|\bот\s+\d", requirement, re.I):
+        return found >= required
+    if re.search(r"не\s+более|максимум|максимальн|\bдо\s+\d", requirement, re.I):
+        return found <= required
+    if re.search(r"\b(?:больше|более)\s+\d", requirement, re.I):
+        return found > required
+    if re.search(r"\b(?:меньше|менее)\s+\d", requirement, re.I):
+        return found < required
+    return required == found
+
+
+def _material_conflict(requirement: str, evidence: str) -> str:
+    materials = ("шерст", "хлоп", "полиэстер", "акрил", "кож")
+    requested = [material for material in materials if material in requirement.casefold()]
+    if not requested:
+        return ""
+    for line in evidence.splitlines():
+        normalized = _norm(line)
+        for material in requested:
+            if re.search(rf"\b(?:без\s+|не\s+содерж\w*\s+){material}\w*", line, re.I):
+                return line[:220]
+            if re.search(rf"\b{material}\w*\s*[:—-]?\s*(?:нет|отсутств\w*)\b", line, re.I):
+                return line[:220]
+        # A declared composition is evidence of a different material. A generic
+        # mention elsewhere on the page is not enough to establish a conflict.
+        explicit_composition = re.search(r"\b(?:состав|материал)\s*:", line, re.I) or re.search(r"100\s*%", line)
+        if explicit_composition and any(material in normalized for material in materials) and not any(material in normalized for material in requested):
+            return line[:220]
+    return ""
+
+
 def _compare_locally(requirement: str, evidence: str) -> dict[str, str]:
     if not evidence:
         return {"status": "unknown", "evidence": ""}
+    material_conflict = _material_conflict(requirement, evidence)
+    if material_conflict:
+        return {"status": "mismatch", "evidence": material_conflict}
+    mandatory_zipper = re.search(r"заст[её]жк\w*.*молни|на\s+(?:замке|молнии)", requirement, re.I) and not re.search(r"пуговиц|без\s+заст[её]жки", requirement, re.I)
+    if mandatory_zipper:
+        for line in evidence.splitlines():
+            if re.search(r"заст[её]жк\w*\s*[:—-]\s*(?:пуговиц\w*|кнопк\w*|нет)|без\s+заст[её]жки", line, re.I) and not re.search(r"молни", line, re.I):
+                return {"status": "mismatch", "evidence": line[:220]}
+    if _CERTIFICATION.search(requirement):
+        required_standard = _STANDARD.search(requirement)
+        for line in evidence.splitlines():
+            if required_standard and _norm(required_standard.group(0)) not in _norm(line):
+                continue
+            if _CERTIFICATION.search(line) and re.search(r"\b(?:не\s+(?:соответств\w*|предостав\w*|подтвержд\w*|сертифицир\w*)|без\s+сертификат\w*|отсутств\w*)", line, re.I):
+                return {"status": "mismatch", "evidence": line[:220]}
     required_numbers = _measurements(requirement)
-    found_numbers = _measurements(evidence)
     if required_numbers:
-        if len(required_numbers) == 1:
-            value, unit = required_numbers[0]
-            title_numbers = _measurements(evidence.splitlines()[0])
-            conflicting = next(((v, u) for v, u in title_numbers if u == unit and v != value), None)
-            if conflicting and (value, unit) not in title_numbers:
-                return {"status": "mismatch", "evidence": evidence.splitlines()[0][:220]}
         context = _number_context(requirement)
-        quote = next((
-            line[:220] for line in evidence.splitlines()
-            if all(part in _measurements(line) for part in required_numbers)
-            and all(word in _norm(line) for word in context)
-        ), "")
-        if quote and all(part in _measurements(quote) for part in required_numbers):
-            return {"status": "matched", "evidence": quote}
+        if len(required_numbers) == 1 and not context:
+            value, unit = required_numbers[0]
+            title_values = _measurements(evidence.splitlines()[0])
+            if any(kind == unit for _, kind in title_values) and not any(kind == unit and _number_matches(value, found, requirement) for found, kind in title_values):
+                return {"status": "mismatch", "evidence": evidence.splitlines()[0][:220]}
+        relevant = [line for line in _evidence_segments(evidence) if all(word in _norm(line) for word in context)]
+        for line in relevant:
+            values = _measurements(line)
+            if all(any(kind == unit and _number_matches(value, found, requirement) for found, kind in values) for value, unit in required_numbers):
+                quote = line[:220]
+                if all(any(kind == unit and _number_matches(value, found, requirement) for found, kind in _measurements(quote)) for value, unit in required_numbers):
+                    return {"status": "matched", "evidence": quote}
+        for line in relevant:
+            values = _measurements(line)
+            if any(any(kind == unit for _, kind in values) and not any(kind == unit and _number_matches(value, found, requirement) for found, kind in values) for value, unit in required_numbers):
+                return {"status": "mismatch", "evidence": line[:220]}
         return {"status": "unknown", "evidence": ""}
 
     normalized = _norm(requirement)
     if len(normalized) >= 6 and normalized in _norm(evidence):
         return {"status": "matched", "evidence": _source_quote(evidence, requirement)}
     return {"status": "unknown", "evidence": ""}
+
+
+def _garment_type_check(requirement: str, evidence: str) -> dict[str, str] | None:
+    requested = next((category for category in _GARMENT_CATEGORIES if re.search(rf"\b{category}\w*", requirement, re.I)), None)
+    if not requested:
+        return None
+    title = evidence.splitlines()[0] if evidence else ""
+    title_types = [category for category in _GARMENT_CATEGORIES if re.search(rf"\b{category}\w*", title, re.I)]
+    if title_types and requested not in title_types:
+        return {"status": "mismatch", "evidence": title[:220]}
+    category_quote = next((line[:220] for line in evidence.splitlines() if re.search(rf"\b{requested}\w*", line, re.I)), "")
+    if not category_quote:
+        return {"status": "unknown", "evidence": ""}
+    requested_gender = "female" if re.search(r"женск|женщин", requirement, re.I) else "male" if re.search(r"мужск|мужчин", requirement, re.I) else None
+    if requested_gender:
+        same = r"женск|женщин" if requested_gender == "female" else r"мужск|мужчин"
+        other = r"мужск|мужчин" if requested_gender == "female" else r"женск|женщин"
+        if re.search(other, title, re.I) and not re.search(same, title, re.I):
+            return {"status": "mismatch", "evidence": title[:220]}
+        if not re.search(same, evidence, re.I):
+            return {"status": "unknown", "evidence": ""}
+        lines = evidence.splitlines()
+        category_quote = next((
+            "\n".join(lines[index:index + 3])[:220]
+            for index, line in enumerate(lines)
+            if re.search(rf"\b{requested}\w*", line, re.I)
+            and re.search(same, "\n".join(lines[index:index + 3])[:220], re.I)
+        ), "")
+        if not category_quote:
+            return {"status": "unknown", "evidence": ""}
+    return {"status": "matched", "evidence": category_quote}
 
 
 def _type_check(requirement: str, evidence: str) -> dict[str, str]:
@@ -155,6 +267,9 @@ def _type_check(requirement: str, evidence: str) -> dict[str, str]:
             return {"status": "mismatch", "evidence": title[:220]}
         if not contains_model(evidence, model):
             return {"status": "unknown", "evidence": ""}
+    garment = _garment_type_check(requirement, evidence)
+    if garment is not None:
+        return garment
     text = _norm(evidence)
     type_text = requirement
     for model in model_identifiers(requirement):
@@ -260,14 +375,11 @@ async def evaluate_product_leads(name: str, specs: str | None, results: list[dic
                 if check["status"] != "unknown" or not suggestion or suggestion.get("status") not in {"matched", "mismatch"}:
                     continue
                 quote = str(suggestion.get("evidence") or "").strip()
-                required_numbers = _measurements(check["requirement"])
-                quote_numbers = _measurements(quote)
-                numbers_supported = suggestion["status"] != "matched" or all(part in quote_numbers for part in required_numbers)
-                context_supported = not required_numbers or all(
-                    word in _norm(quote) for word in _number_context(check["requirement"])
-                )
-                standard_supported = "ГОСТ" not in check["requirement"].upper() or _norm(check["requirement"]) in _norm(quote)
-                if 5 <= len(quote) <= 220 and _norm(quote) in _norm(evidence) and numbers_supported and context_supported and standard_supported:
+                # A real quote alone does not prove the AI's interpretation.
+                # Recheck its claim, including model, numeric context and ГОСТ,
+                # against that exact quote before changing an unknown result.
+                supported = _type_check(check["requirement"], quote) if check["id"] == "type" else _compare_locally(check["requirement"], quote)
+                if 5 <= len(quote) <= 220 and _norm(quote) in _norm(evidence) and supported["status"] == suggestion["status"]:
                     check["status"] = suggestion["status"]
                     check["evidence"] = quote
             row["match_status"] = _status(row["checks"])
@@ -275,8 +387,20 @@ async def evaluate_product_leads(name: str, specs: str | None, results: list[dic
     for row in results:
         row.pop("evidence_text", None)
     rank = {"matched": 0, "partial": 1, "unknown": 2, "mismatch": 3, "unverified": 4}
+    def availability_rank(row: dict[str, Any]) -> int:
+        if not row.get("page_verified"):
+            return 1
+        value = str(row.get("availability") or "").casefold().rsplit("/", 1)[-1]
+        if value in {"instock", "в наличии"}:
+            return 0
+        if value in {"outofstock", "soldout", "discontinued", "нет в наличии"}:
+            return 2
+        return 1
     return sorted(results, key=lambda row: (
         rank.get(row["match_status"], 5),
+        availability_rank(row),
         -sum(check.get("status") == "matched" for check in row.get("checks", [])),
         not bool(row.get("image_url")),
+        row.get("price") is None,
+        not bool(row.get("seller_phone") or row.get("seller_phones")),
     ))

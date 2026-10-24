@@ -4,6 +4,7 @@ import asyncio
 import html
 import ipaddress
 import json
+import math
 import re
 from html.parser import HTMLParser
 from typing import Any
@@ -14,7 +15,7 @@ from app.services.product_identity import contains_model, model_identifiers
 
 
 _IMAGE_NOISE = re.compile(r"favicon|logo|sprite|placeholder|/watch/|portal-portable|base_satu|pixel", re.I)
-_GENERIC_PATH = re.compile(r"/(category|search|list|catalog/0|catalog/search|shop/search)(/|$)|/f/", re.I)
+_GENERIC_PATH = re.compile(r"/(category|search|list|catalog/0|catalog/search|shop/search)(/|$)|/f/|^/catalog/?$", re.I)
 _PRODUCT_PATH = re.compile(
     r"/p\d+[-/]|/p/[^/]+|/products?/[^/]+|/goods?/[^/]+|/catalog/\d+/detail|"
     r"/catalog/[^/]+/detail|/items?/\d+|--\d{4,}/?$",
@@ -25,6 +26,122 @@ _STOCK_TEXT = re.compile(r"(?:в наличии|на складе|остаток
 _SATU_PHONE = re.compile(r"PhoneDescription:(\+7\s*\(\d{3}\)\s*\d{3}[-\s]\d{2}[-\s]\d{2})", re.I)
 _PHONE_TEXT = re.compile(r"(?<!\d)(?:\+7|8)\s*\(?\d{3}\)?[\s.-]*\d{3}[\s.-]*\d{2}[\s.-]*\d{2}(?!\d)")
 _MARKETPLACE_HOSTS = {"satu.kz", "kaspi.kz", "ozon.kz", "wildberries.kz", "wildberries.ru"}
+_VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+
+
+def _price_number(value: Any) -> float | None:
+    if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+        return None
+    number = re.sub(r"\s+", "", str(value)).replace(",", ".")
+    try:
+        parsed = float(number)
+        return parsed if math.isfinite(parsed) and 0 < parsed <= 1_000_000_000_000 else None
+    except ValueError:
+        return None
+
+
+def _availability(value: Any) -> str | None:
+    text = str(value or "").rsplit("/", 1)[-1].casefold().replace("-", "")
+    return {
+        "instock": "InStock", "outofstock": "OutOfStock", "soldout": "SoldOut",
+        "preorder": "PreOrder", "backorder": "BackOrder", "discontinued": "Discontinued",
+        "limitedavailability": "LimitedAvailability",
+    }.get(text)
+
+
+class _CommercialParser(HTMLParser):
+    """Read only the main item's commercial fields, never cart/recommendation prices."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack: list[dict[str, Any]] = []
+        self.main_root: dict[str, Any] | None = None
+        self.heading_seen = False
+        self.captures: list[dict[str, Any]] = []
+        self.prices: list[str] = []
+        self.stock_labels: list[str] = []
+        self.root_availability: str | None = None
+        self.sku: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
+        attributes = dict(attrs)
+        classes = set((attributes.get("class") or "").casefold().split())
+        context = " ".join(classes)
+        parent = self.stack[-1] if self.stack else {}
+        ignored = parent.get("ignored", False) or tag in {"script", "style", "del"} or bool(re.search(
+            r"related|upsell|cross.sell|recommend|cart.totals|mini.cart|old.price|price.old|installment|monthly|credit", context
+        )) or (tag == "li" and "type-product" in classes)
+        root = attributes.get("data-elementor-type") == "product" or (
+            tag != "li" and "type-product" in classes
+        )
+        scope = parent.get("scope", False) or bool(classes & {
+            "summary", "entry-summary", "product-summary", "product__info", "product-info",
+        }) or "woocommerce-product-price" in (attributes.get("data-widget_type") or "")
+        entry = {"tag": tag, "ignored": ignored, "root": root, "scope": scope, "classes": classes}
+        if tag == "h1" and classes & {"product_title", "product-title", "product__name", "product-name", "product_name"}:
+            self.heading_seen = True
+            self.main_root = next((row for row in reversed(self.stack) if row["root"]), None)
+            if self.main_root and not self.main_root["ignored"]:
+                self.root_availability = next((state for name in self.main_root["classes"] if (state := _availability(name))), None)
+        in_main = self.main_root is not None and any(row is self.main_root for row in self.stack)
+        eligible = self.heading_seen and (in_main or scope) and not ignored
+        kind = None
+        if eligible:
+            if "price" in classes or classes & {"product__price", "product-price", "product_price"} or attributes.get("itemprop") == "price":
+                kind = "price"
+            elif classes & {"stock", "availability", "product-availability", "product__availability"}:
+                kind = "stock"
+            elif "sku" in classes or attributes.get("itemprop") == "sku":
+                kind = "sku"
+        if tag not in _VOID_TAGS:
+            self.stack.append(entry)
+            if kind and not any(capture["kind"] == kind for capture in self.captures):
+                self.captures.append({"kind": kind, "entry": entry, "text": []})
+
+    def handle_data(self, data: str):
+        if self.stack and not self.stack[-1]["ignored"]:
+            for capture in self.captures:
+                capture["text"].append(data)
+
+    def handle_endtag(self, tag: str):
+        index = next((i for i in range(len(self.stack) - 1, -1, -1) if self.stack[i]["tag"] == tag), None)
+        if index is None:
+            return
+        removed = self.stack[index:]
+        for capture in list(self.captures):
+            if any(capture["entry"] is entry for entry in removed):
+                text = _clean("".join(capture["text"]), 300)
+                if capture["kind"] == "price":
+                    self.prices.append(text)
+                elif capture["kind"] == "stock":
+                    self.stock_labels.append(text)
+                elif capture["kind"] == "sku" and text:
+                    self.sku = text
+                self.captures.remove(capture)
+        del self.stack[index:]
+
+    def price(self) -> tuple[float | None, str | None]:
+        values = []
+        for text in self.prices:
+            for amount, currency in re.findall(r"(\d[\d\s\u00a0\u202f]*(?:[.,]\d{1,2})?)\s*(₸|тенге|тг|KZT|руб\.?|₽|USD|\$|EUR|€)", text, re.I):
+                price = _price_number(amount)
+                if price:
+                    code = "KZT" if currency.casefold() in {"₸", "тенге", "тг", "kzt"} else "RUB" if currency in {"₽", "руб", "руб."} else "USD" if currency in {"USD", "$"} else "EUR"
+                    values.append((price, code))
+        unique = list(dict.fromkeys(values))
+        return unique[0] if len(unique) == 1 else (None, None)
+
+    def availability(self) -> str | None:
+        labels = " ".join(self.stock_labels).casefold()
+        if re.search(r"нет\s+в\s+наличии|отсутствует|out\s+of\s+stock|sold\s+out", labels):
+            return "OutOfStock"
+        if re.search(r"под\s*заказ|предзаказ|pre.?order|ожидается", labels):
+            return "PreOrder"
+        if self.root_availability in {"OutOfStock", "SoldOut", "PreOrder", "BackOrder", "Discontinued"}:
+            return self.root_availability
+        if re.search(r"\bв\s+наличии\b|\bin\s+stock\b", labels):
+            return "InStock"
+        return self.root_availability
 
 
 def is_public_url(url: str) -> bool:
@@ -223,10 +340,13 @@ class _PageParser(HTMLParser):
         self._row: list[str] | None = None
         self._cell: list[str] | None = None
         self.rows: list[list[str]] = []
+        self.canonical: str | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
         attributes = dict(attrs)
-        if tag == "meta":
+        if tag == "link" and "canonical" in (attributes.get("rel") or "").split():
+            self.canonical = attributes.get("href")
+        elif tag == "meta":
             key = attributes.get("property") or attributes.get("name") or attributes.get("itemprop")
             if key and attributes.get("content"):
                 self.meta[key.lower()] = attributes["content"] or ""
@@ -298,6 +418,10 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
             break
 
     path = urlparse(page_url).path
+    host = (urlparse(page_url).hostname or "").removeprefix("www.")
+    if host == "olx.kz" and not re.match(r"/(?:d/)?obyavlenie/", path, re.I):
+        # OLX category/search pages embed featured Product/Offer JSON-LD.
+        return {"is_product_page": False, "page_verified": True}
     # Satu's top-level *.html pages are collections. Their JSON-LD often
     # contains an unrelated featured Product with its own photo and price.
     if (
@@ -355,11 +479,19 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
         offer = offer[0] if offer else {}
     if not isinstance(offer, dict):
         offer = {}
-    price = offer.get("price") or offer.get("lowPrice")
-    try:
-        price = float(str(price).replace(" ", "").replace(",", ".")) if price else None
-    except ValueError:
-        price = None
+    commercial = _CommercialParser()
+    commercial.feed(markup)
+    visible_price, visible_currency = commercial.price()
+    price = _price_number(offer.get("price") or offer.get("lowPrice"))
+    currency = offer.get("priceCurrency") if price else None
+    if price is None:
+        price = _price_number(parser.meta.get("product:price:amount"))
+        currency = parser.meta.get("product:price:currency") if price else None
+    if price is None:
+        price, currency = visible_price, visible_currency
+    elif visible_price is not None and (not currency or currency == visible_currency):
+        # A scoped sale price displayed now can supersede an old JSON-LD amount.
+        price, currency = visible_price, visible_currency
     image = (
         _image_url(product.get("image"), page_url)
         or _image_url(parser.meta.get("og:image"), page_url)
@@ -367,6 +499,12 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
         or _best_page_image(parser.images, page_url, name or page_title)
     )
     stock_quantity, stock_unit = _stock_quantity(offer, description, properties)
+    availability = _availability(offer.get("availability"))
+    visible_availability = commercial.availability()
+    if not availability or visible_availability in {"OutOfStock", "SoldOut", "PreOrder", "BackOrder", "Discontinued"}:
+        availability = visible_availability or availability
+    if stock_quantity == 0:
+        availability = "OutOfStock"
     seller_name, seller_phones = _seller_details(offer, markup, page_url)
     evidence = "\n".join(filter(None, [name, description, *[f"{k}: {v}" for k, v in properties.items()]]))[:6500]
     return {
@@ -377,8 +515,10 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
         "characteristics": properties,
         "image_url": image,
         "price": price,
-        "currency": offer.get("priceCurrency") if price else None,
-        "availability": str(offer.get("availability") or "").rsplit("/", 1)[-1] or None,
+        "currency": currency if price else None,
+        "availability": availability,
+        "canonical_url": urljoin(page_url, parser.canonical) if parser.canonical and urlparse(urljoin(page_url, parser.canonical)).hostname == urlparse(page_url).hostname else None,
+        "product_sku": _clean(str(product["sku"]), 120) if product.get("sku") is not None else commercial.sku,
         "stock_quantity": stock_quantity,
         "stock_unit": stock_unit,
         "seller_name": seller_name,
