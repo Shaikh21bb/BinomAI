@@ -1,9 +1,11 @@
 """Focused requirement and evidence regressions from the live PDF/Word checks."""
 
+from unittest.mock import Mock
+
+import httpx
 import pytest
 
 from app.core.config import settings
-from app.services import product_matching
 from app.services.product_matching import _compare_locally, _requirements, _type_check, evaluate_product_leads
 
 
@@ -24,6 +26,16 @@ JACKET_SPECS = (
 def no_paid_matching(monkeypatch):
     monkeypatch.setattr(settings, "GOOGLE_AI_API_KEY", None)
     monkeypatch.setattr(settings, "OPENAI_API_KEY", None)
+
+
+@pytest.fixture
+def configured_ai_without_requests(monkeypatch):
+    monkeypatch.setattr(settings, "GOOGLE_AI_API_KEY", "configured-but-not-used")
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "configured-but-not-used")
+    client = Mock(side_effect=AssertionError("Product matching must not request an AI provider"))
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    yield
+    client.assert_not_called()
 
 
 def test_procurement_jacket_keeps_product_requirements_not_buyer_instructions():
@@ -130,16 +142,7 @@ async def test_in_stock_partial_ranks_before_sold_out_partial_with_more_checked_
 
 
 @pytest.mark.asyncio
-async def test_ai_cannot_attach_an_existing_unrelated_quote_to_a_requirement(monkeypatch):
-    monkeypatch.setattr(settings, "GOOGLE_AI_API_KEY", "test-key")
-
-    async def misleading_answer(requirements, candidates):
-        return {"candidates": [{"url": candidates[0]["url"], "checks": [
-            {"id": requirement["id"], "status": "matched", "evidence": "Жакет женский"}
-            for requirement in requirements if requirement["id"] != "type"
-        ]}]}
-
-    monkeypatch.setattr(product_matching, "_ask_ai", misleading_answer)
+async def test_configured_ai_cannot_fill_missing_requirements_or_request_provider(configured_ai_without_requests):
     leads = await evaluate_product_leads(
         JACKET_NAME, "100% шерсть; ГОСТ 25295-2003",
         [_lead("https://shop.example.kz/p/jacket", "Жакет женский")],
@@ -147,6 +150,43 @@ async def test_ai_cannot_attach_an_existing_unrelated_quote_to_a_requirement(mon
 
     assert leads[0]["match_status"] == "partial"
     assert all(check["status"] == "unknown" for check in leads[0]["checks"][1:])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requirement,evidence,quote", [
+    ("ГОСТ 25295-2003", "Нет сертификата ГОСТ 25295-2003", "ГОСТ 25295-2003"),
+    ("ГОСТ 25295-2003", "ГОСТ 25295-2003: сертификат отсутствует", "ГОСТ 25295-2003"),
+    ("Рукав длинный", "Рукав: длинный\nРукав: короткий", "Рукав: длинный"),
+    ("100% шерсть", "Состав: 100% шерсть\nСостав: 10% шерсть", "Состав: 100% шерсть"),
+    ("мощность всасывания 470 Вт", "Мощность всасывания: 470 Вт / 400 Вт", "Мощность всасывания: 470 Вт"),
+])
+async def test_configured_ai_cannot_cherry_pick_positive_quote_from_unproven_full_source(configured_ai_without_requests, requirement, evidence, quote):
+    assert _compare_locally(requirement, evidence)["status"] == "unknown"
+    assert _compare_locally(requirement, quote)["status"] == "matched"
+
+    leads = await evaluate_product_leads(
+        "Жакет женский", requirement,
+        [_lead("https://shop.example.kz/p/jacket", f"Жакет женский\n{evidence}")],
+    )
+
+    check = next(check for check in leads[0]["checks"] if check["requirement"] == requirement)
+    assert check["status"] == "unknown"
+    assert not check["evidence"]
+    assert leads[0]["match_status"] == "partial"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("additional_requirement,expected", [("", "matched"), ("; Рукав длинный", "partial")])
+async def test_complete_positive_evidence_remains_confirmed_with_ai_enabled(configured_ai_without_requests, additional_requirement, expected):
+    leads = await evaluate_product_leads(
+        "Жакет женский", f"ГОСТ 25295-2003{additional_requirement}",
+        [_lead("https://shop.example.kz/p/jacket", "Жакет женский\nСоответствует ГОСТ 25295-2003")],
+    )
+
+    assert next(check for check in leads[0]["checks"] if "ГОСТ" in check["requirement"])["status"] == "matched"
+    if additional_requirement:
+        assert next(check for check in leads[0]["checks"] if check["requirement"] == "Рукав длинный")["status"] == "unknown"
+    assert leads[0]["match_status"] == expected
 
 
 @pytest.mark.parametrize("evidence,expected", [

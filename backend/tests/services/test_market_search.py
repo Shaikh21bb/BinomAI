@@ -123,8 +123,12 @@ def test_instock_early_stop_accepts_current_phone_list_but_not_type_only_confirm
 ])
 @pytest.mark.asyncio
 async def test_three_commercially_complete_instock_cards_do_not_stop_with_unproven_requirements(monkeypatch, evidence):
+    from unittest.mock import Mock
+
+    import httpx
+
     from app.core.config import settings
-    from app.services import market_search, product_matching
+    from app.services import market_search
 
     queries = []
 
@@ -138,21 +142,21 @@ async def test_three_commercially_complete_instock_cards_do_not_stop_with_unprov
                  "image_url": "https://images.example.kz/jacket.jpg", "price": 50000, "currency": "KZT", "seller_phone": "+77001112233",
                  "evidence_text": evidence if "wrong" in row["url"] else "Жакет женский\nМатериал: шерсть\nГОСТ 25295-2003"} for row in rows]
 
-    async def forbidden_ai(*_args):
-        raise AssertionError("Discovery must not invoke a paid AI check")
+    forbidden_http = Mock(side_effect=AssertionError("Discovery must not create an HTTP client for technical checks"))
 
     monkeypatch.setattr(settings, "GOOGLE_CSE_API_KEY", None)
     monkeypatch.setattr(settings, "GOOGLE_AI_API_KEY", "configured-but-not-used")
     monkeypatch.setattr(settings, "OPENAI_API_KEY", "configured-but-not-used")
     monkeypatch.setattr(market_search, "_duckduckgo", search)
     monkeypatch.setattr(market_search, "enrich_product_pages", enrich)
-    monkeypatch.setattr(product_matching, "_ask_ai", forbidden_ai)
+    monkeypatch.setattr(httpx, "AsyncClient", forbidden_http)
     rows = await search_products("Жакет женский", specs="Материал: шерсть; ГОСТ 25295-2003")
 
     assert len(queries) == 2
     assert all("matched" in row["url"] for row in rows[:3])
     assert all("evidence_text" in row for row in rows)
     assert not any("match_status" in row for row in rows)
+    forbidden_http.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -471,20 +475,21 @@ def test_wrong_model_is_not_matched_by_the_shared_prefix():
 
 @pytest.mark.asyncio
 async def test_ai_cannot_promote_compatible_spare_part_to_full_appliance(monkeypatch):
+    from unittest.mock import Mock
+
+    import httpx
+
     from app.core.config import settings
-    from app.services import product_matching
 
     monkeypatch.setattr(settings, "GOOGLE_AI_API_KEY", "test-key")
     monkeypatch.setattr(settings, "OPENAI_API_KEY", None)
 
-    async def misleading_ai(*_args):
-        return {"candidates": [{"url": "https://shop.example.kz/product/filter", "checks": [
-            {"id": "type", "status": "matched", "evidence": "HEPA-фильтр для пылесоса Philips FC9734/01"},
-        ]}]}
+    forbidden_http = Mock(side_effect=AssertionError("Configured AI keys must not trigger a matching HTTP client"))
 
-    monkeypatch.setattr(product_matching, "_ask_ai", misleading_ai)
+    monkeypatch.setattr(httpx, "AsyncClient", forbidden_http)
     leads = await evaluate_product_leads("Пылесос Philips FC9734/01", None, [{
         "url": "https://shop.example.kz/product/filter", "is_product_page": True, "page_verified": True,
         "evidence_text": "HEPA-фильтр для пылесоса Philips FC9734/01",
     }])
     assert leads[0]["match_status"] == "mismatch"
+    forbidden_http.assert_not_called()

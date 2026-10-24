@@ -1,5 +1,7 @@
 import json
+from unittest.mock import Mock
 
+import httpx
 import pytest
 
 from app.services.product_matching import _compare_locally, _requirements, _type_check, evaluate_product_leads
@@ -453,19 +455,13 @@ async def test_matching_package_size_does_not_validate_a_different_product(monke
 
 
 @pytest.mark.asyncio
-async def test_ai_quote_must_exist_in_source(monkeypatch):
+async def test_unpublished_certificate_stays_unknown_without_ai_request(monkeypatch):
     from app.core.config import settings
-    from app.services import product_matching
 
     monkeypatch.setattr(settings, "GOOGLE_AI_API_KEY", "test-key")
-    monkeypatch.setattr(settings, "OPENAI_API_KEY", None)
-
-    async def invented_answer(requirements, candidates):
-        return {"candidates": [{"url": candidates[0]["url"], "checks": [
-            {"id": "r2", "status": "matched", "evidence": "Сертификат ГОСТ Р 51696-2003 подтверждён"},
-        ]}]}
-
-    monkeypatch.setattr(product_matching, "_ask_ai", invented_answer)
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "test-key")
+    client = Mock(side_effect=AssertionError("Product matching must not request an AI provider"))
+    monkeypatch.setattr(httpx, "AsyncClient", client)
     leads = await evaluate_product_leads(
         "Моющее средство для посуды, 500 мл",
         "ГОСТ Р 51696-2003",
@@ -474,22 +470,17 @@ async def test_ai_quote_must_exist_in_source(monkeypatch):
     )
     assert leads[0]["match_status"] == "partial"
     assert leads[0]["checks"][-1]["status"] == "unknown"
+    client.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_ai_cannot_confirm_percentage_without_named_ingredient(monkeypatch):
+async def test_percentage_without_named_ingredient_stays_unknown_without_ai_request(monkeypatch):
     from app.core.config import settings
-    from app.services import product_matching
 
     monkeypatch.setattr(settings, "GOOGLE_AI_API_KEY", "test-key")
-    monkeypatch.setattr(settings, "OPENAI_API_KEY", None)
-
-    async def misleading_answer(requirements, candidates):
-        return {"candidates": [{"url": candidates[0]["url"], "checks": [
-            {"id": "r2", "status": "matched", "evidence": "Состав: 5% очищенная вода"},
-        ]}]}
-
-    monkeypatch.setattr(product_matching, "_ask_ai", misleading_answer)
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "test-key")
+    client = Mock(side_effect=AssertionError("Product matching must not request an AI provider"))
+    monkeypatch.setattr(httpx, "AsyncClient", client)
     leads = await evaluate_product_leads(
         "Моющее средство для туалета, 500 мл",
         "н-ПАВ больше 5%",
@@ -497,3 +488,4 @@ async def test_ai_cannot_confirm_percentage_without_named_ingredient(monkeypatch
           "evidence_text": "Моющее средство для туалета 500 мл\nСостав: 5% очищенная вода"}],
     )
     assert leads[0]["checks"][-1]["status"] == "unknown"
+    client.assert_not_called()
