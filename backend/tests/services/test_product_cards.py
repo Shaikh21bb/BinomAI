@@ -137,6 +137,66 @@ def test_collection_embedded_product_price_and_stock_are_not_a_concrete_item(url
     assert "availability" not in page
 
 
+@pytest.mark.parametrize("url", [
+    "https://fashion.example.kz/catalog/cat-zakety-38356/tissue-serst",
+    "https://fashion.example.kz/catalog/category-jackets/material-wool/",
+    "https://fashion.example.kz/collections/wool-jackets/",
+])
+def test_faceted_collection_cannot_borrow_a_featured_products_commerce(url):
+    name = "Жакеты из шерсти — скидки до 70%"
+    page = parse_product_page(_markup({
+        "@type": "Product", "name": name, "sku": "featured-123",
+        "url": "https://fashion.example.kz/products/jacket-123/",
+        "image": "https://images.example.kz/featured-jacket.jpg",
+        "offers": {"price": "19538", "priceCurrency": "KZT", "availability": "https://schema.org/InStock"},
+    }, name), url)
+    assert page == {"is_product_page": False, "page_verified": True}
+    assert not looks_like_product_url(url)
+
+
+@pytest.mark.parametrize("schema", [
+    {"@type": "CollectionPage"},
+    {"@type": "https://schema.org/ItemList"},
+    {"@type": "WebPage", "mainEntity": {"@type": "ItemList"}},
+])
+def test_collection_schema_is_not_a_detail_even_at_a_product_shaped_url(schema):
+    product = {
+        "@type": "Product", "name": "Шерстяной жакет",
+        "offers": {"price": "19538", "availability": "https://schema.org/InStock"},
+    }
+    markup = _markup({"@graph": [schema, product]}, "Шерстяной жакет").replace(
+        "</body>", '<h1>Шерстяной жакет</h1><img src="/jacket.jpg"></body>',
+    )
+    page = parse_product_page(markup, "https://fashion.example.kz/products/wool-jackets/")
+    assert page == {"is_product_page": False, "page_verified": True}
+
+
+def test_own_detail_identity_survives_listing_context_and_ignores_featured_product():
+    url = "https://fashion.example.kz/catalog/cat-jackets/wool-jacket-123/"
+    name = "Жакет шерстяной Model 123"
+    markup = _markup({"@graph": [
+        {"@type": "CollectionPage", "mainEntity": {"@type": "ItemList"}},
+        {"@type": "Product", "name": "Другой жакет", "url": "https://fashion.example.kz/products/other/",
+         "offers": {"price": "1", "availability": "https://schema.org/OutOfStock"}},
+        {"@type": "Product", "name": name, "url": url, "sku": "123",
+         "offers": {"price": "19538", "priceCurrency": "KZT", "availability": "https://schema.org/InStock"}},
+    ]}, name).replace("</body>", f'<h1 class="product_title">{name}</h1><img src="/jacket.jpg"></body>')
+    page = parse_product_page(markup, url)
+    assert page["is_product_page"] is True
+    assert page["product_sku"] == "123"
+    assert page["price"] == 19538
+    assert page["availability"] == "InStock"
+
+
+def test_detail_product_breadcrumb_item_list_is_not_a_collection_context():
+    page = parse_product_page(_markup({
+        "@type": "WebPage", "breadcrumb": {"@type": "ItemList"},
+        "mainEntity": {"@type": "Product", "name": "Шерстяной жакет", "offers": {"price": "19538"}},
+    }, "Шерстяной жакет"), "https://fashion.example.kz/item/123")
+    assert page["is_product_page"] is True
+    assert page["price"] == 19538
+
+
 def test_published_inventory_count_is_separate_from_availability():
     page = parse_product_page(
         _markup(

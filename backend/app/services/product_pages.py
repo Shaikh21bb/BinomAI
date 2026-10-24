@@ -16,6 +16,11 @@ from app.services.product_identity import contains_model, model_identifiers
 
 _IMAGE_NOISE = re.compile(r"favicon|logo|sprite|placeholder|/watch/|portal-portable|base_satu|pixel", re.I)
 _GENERIC_PATH = re.compile(r"/(category|search|list|catalog/0|catalog/search|shop/search)(/|$)|/f/|^/catalog/?$", re.I)
+_COLLECTION_PATH = re.compile(
+    r"/(?:collections?|categories)(?:/|$)|/(?:catalog|shop)/cat(?:egory)?-[^/]+(?:/|$)|"
+    r"/(?:filters?|facets?)(?:/|$)",
+    re.I,
+)
 _PRODUCT_PATH = re.compile(
     r"/p\d+[-/]|/p/[^/]+|/products?/[^/]+|/goods?/[^/]+|/catalog/\d+/detail|"
     r"/catalog/[^/]+/detail|/items?/\d+|--\d{4,}/?$",
@@ -162,7 +167,7 @@ def looks_like_product_url(url: str) -> bool:
     if not is_public_url(url):
         return False
     path = urlparse(url).path
-    return not _GENERIC_PATH.search(path) and bool(_PRODUCT_PATH.search(path))
+    return not (_GENERIC_PATH.search(path) or _COLLECTION_PATH.search(path)) and bool(_PRODUCT_PATH.search(path))
 
 
 async def _resolves_publicly(url: str) -> bool:
@@ -325,6 +330,37 @@ def _product_objects(value: Any):
                 yield from _product_objects(value[key])
 
 
+def _has_collection_schema(value: Any) -> bool:
+    """Only page-level graph/mainEntity types count, not a product's breadcrumbs."""
+    if isinstance(value, list):
+        return any(_has_collection_schema(part) for part in value)
+    if not isinstance(value, dict):
+        return False
+    kinds = value.get("@type", [])
+    kinds = kinds if isinstance(kinds, list) else [kinds]
+    if any(str(kind).rsplit("/", 1)[-1].casefold() in {"collectionpage", "itemlist"} for kind in kinds):
+        return True
+    return any(_has_collection_schema(value[key]) for key in ("@graph", "mainEntity") if key in value)
+
+
+def _own_product_identity(product: dict[str, Any], page_url: str, heading: str, product_heading: bool) -> bool:
+    """A collection's featured item is not the item identified by the current URL."""
+    name = _clean(product.get("name")).casefold()
+    if not name or name != _clean(heading).casefold() or not (product_heading or looks_like_product_url(page_url)):
+        return False
+    page = urlparse(page_url)
+    for key in ("url", "@id", "mainEntityOfPage"):
+        target = product.get(key)
+        if isinstance(target, dict):
+            target = target.get("@id") or target.get("url")
+        if not isinstance(target, str):
+            continue
+        parsed = urlparse(urljoin(page_url, target))
+        if parsed.hostname == page.hostname and parsed.path.rstrip("/") == page.path.rstrip("/"):
+            return True
+    return False
+
+
 class _PageParser(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -333,6 +369,7 @@ class _PageParser(HTMLParser):
         self._script: list[str] | None = None
         self._title: list[str] | None = None
         self._heading: list[str] | None = None
+        self._heading_is_product = False
         self.title = ""
         self.heading = ""
         self.product_heading = False
@@ -357,7 +394,7 @@ class _PageParser(HTMLParser):
         elif tag == "h1":
             self._heading = []
             classes = (attributes.get("class") or "").split()
-            self.product_heading = self.product_heading or bool(set(classes) & {
+            self._heading_is_product = bool(set(classes) & {
                 "product_title", "product-title", "product__name", "product-name", "product_name",
             })
         elif tag == "img":
@@ -394,6 +431,7 @@ class _PageParser(HTMLParser):
         elif tag == "h1" and self._heading is not None:
             if not self.heading:
                 self.heading = _clean("".join(self._heading))
+                self.product_heading = self._heading_is_product
             self._heading = None
         elif tag in {"th", "td"} and self._cell is not None:
             if self._row is not None:
@@ -408,14 +446,18 @@ class _PageParser(HTMLParser):
 def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
     parser = _PageParser()
     parser.feed(markup)
-    product = None
+    products = []
+    collection_schema = False
     for script in parser.scripts:
         try:
-            product = next(_product_objects(json.loads(script)), None)
+            structured = json.loads(script)
         except (ValueError, TypeError):
             continue
-        if product:
-            break
+        products.extend(_product_objects(structured))
+        collection_schema = collection_schema or _has_collection_schema(structured)
+    product = next((item for item in products if _own_product_identity(
+        item, page_url, parser.heading, parser.product_heading,
+    )), products[0] if products else None)
 
     path = urlparse(page_url).path
     host = (urlparse(page_url).hostname or "").removeprefix("www.")
@@ -444,6 +486,11 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
     if product and not name_on_page:
         # Recommendations embedded beside the main item are not its evidence.
         product = None
+    if (collection_schema or _COLLECTION_PATH.search(path)) and not (
+        product and _own_product_identity(product, page_url, parser.heading, parser.product_heading)
+    ):
+        # Listing prices/stock belong to one of the listed items, not this page.
+        return {"is_product_page": False, "page_verified": True}
     leaf = path.rstrip("/").rsplit("/", 1)[-1]
     concrete_catalog_leaf = bool(
         "/catalog/" in path.casefold()
