@@ -13,6 +13,42 @@ from app.services.product_pages import fetch_product_page, is_public_url, looks_
 
 logger = structlog.get_logger(__name__)
 
+_TYPE_STOP_WORDS = {
+    "для", "товар", "изделие", "средство", "моющее", "жидкое", "жидкий", "купить", "цена",
+    "женский", "женская", "женское", "мужской", "мужская", "детский", "детская", "шт", "штук",
+}
+
+
+def _word_stem(word: str) -> str:
+    stem = re.sub(r"(?:ами|ями|ого|ему|ыми|ими|ая|яя|ое|ее|ые|ие|ий|ый|ой|ов|ев|ам|ям|ах|ях|ом|ем|а|я|ы|и|у|ю|е)$", "", word)
+    return stem if len(stem) >= 4 else word
+
+
+def _transliterate(text: str) -> str:
+    # Public vendor URL slugs often become discovery titles before the page is read.
+    alphabet = {
+        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+        "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+        "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+        "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch", "ы": "y",
+        "э": "e", "ю": "yu", "я": "ya", "ъ": "", "ь": "",
+    }
+    return "".join(alphabet.get(char, char) for char in text.casefold())
+
+
+def _primary_query(query: str) -> str:
+    """Keep the product type; its detailed requirements are checked after discovery."""
+    if model_identifiers(query):
+        return query
+    short = re.split(r";|\s+(?:на|из|с|со)\s+", query, maxsplit=1, flags=re.I)[0].strip()
+    return short if len(short.split()) >= 2 else query
+
+
+def _relevant_candidates(results: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+    if model_identifiers(query):
+        return _matching_models(results, query)
+    return [row for row in results if _relevant_result(row, query)]
+
 # Kazakhstan marketplaces used for fallback links
 MARKETPLACES = [
     {"name": "Kaspi.kz", "url": "https://kaspi.kz/shop/search/?text={q}"},
@@ -32,27 +68,26 @@ async def search_products(query: str, region: Optional[str] = None) -> List[Dict
     """
     results: List[Dict[str, Any]] = []
 
-    q = query
+    primary_query = _primary_query(query)
+    q = primary_query
     if region:
-        q = f"{query} купить {region}"
+        q = f"{primary_query} купить {region}"
 
     try:
         if settings.GOOGLE_CSE_API_KEY and settings.GOOGLE_CSE_ID:
             google_results = await _google_cse(q, region)
             if google_results:
-                results = await enrich_product_pages(_matching_models(google_results, query)[:8])
+                results = _relevant_candidates(await enrich_product_pages(_relevant_candidates(google_results, query)[:8]), query)
                 if sum(bool(row.get("is_product_page")) for row in results) >= 6:
                     return results
     except Exception as e:
         logger.warning("google_cse_search_failed", error=str(e)[:200])
 
     try:
-        ddg = await _duckduckgo(query, region)
-        filtered = _matching_models([
-            r for r in ddg if _looks_like_price(r) or _looks_like_product_page(r) or _relevant_result(r, query)
-        ], query)
+        ddg = await _duckduckgo(primary_query, region)
+        filtered = _relevant_candidates(ddg, query)
         if filtered:
-            enriched = await enrich_product_pages(filtered[:8])
+            enriched = _relevant_candidates(await enrich_product_pages(filtered[:8]), query)
             results = _unique_results(results + enriched)
             if sum(bool(row.get("is_product_page")) for row in results) >= 6:
                 return results
@@ -62,7 +97,7 @@ async def search_products(query: str, region: Optional[str] = None) -> List[Dict
     # Long tender prose can make generic web search return categories. A short
     # marketplace product-page query gives concrete items to inspect.
     try:
-        marketplace_query = re.sub(r"моющее средство для посуды", "средство для мытья посуды", query, flags=re.I)
+        marketplace_query = re.sub(r"моющее средство для посуды", "средство для мытья посуды", primary_query, flags=re.I)
         short_query = marketplace_query.split(";")[0][:85]
         targeted_batches = await asyncio.gather(
             _satu_search(short_query, region),
@@ -77,7 +112,7 @@ async def search_products(query: str, region: Optional[str] = None) -> List[Dict
             for row in batch
             if looks_like_product_url(row.get("url") or "")
         ])
-        candidates = await enrich_product_pages(_matching_models(concrete_urls, query)[:8])
+        candidates = _relevant_candidates(await enrich_product_pages(_relevant_candidates(concrete_urls, query)[:8]), query)
         results = _unique_results(candidates + results)
     except Exception as e:
         logger.warning("targeted_product_search_failed", error_type=type(e).__name__)
@@ -352,10 +387,27 @@ def _looks_like_product_page(match: Dict[str, Any]) -> bool:
 
 
 def _relevant_result(match: Dict[str, Any], query: str) -> bool:
-    """Keep a result when the title carries the query and the site looks like a vendor."""
-    title = (match.get("title") or "").lower()
-    words = [w.lower() for w in re.findall(r"[а-яёa-z0-9]+", query) if len(w) > 2]
-    if not words or not any(w in title for w in words):
+    """Price or a marketplace URL cannot substitute for the requested product type."""
+    title = (match.get("title") or "").casefold()
+    words = [word for word in re.findall(r"[а-яёa-z]+", query.casefold()) if len(word) >= 4 and word not in _TYPE_STOP_WORDS]
+    if not words:
         return False
-    url = (match.get("url") or "").lower()
-    return ".kz" in url or any(k in url for k in ["kaspi", "satu", "alser", "sulpak", "technodom", "wildberries"])
+    primary = _word_stem(words[0])
+    title_words = re.findall(r"[а-яёa-z]+", title)
+    latin_primary = _transliterate(primary)
+    if not any(
+        _word_stem(word) == primary
+        or re.fullmatch(re.escape(latin_primary) + r"(?:a|y|i|u|ov|am|ah|ami)?", _transliterate(word))
+        for word in title_words
+    ):
+        return False
+    # A cover/hanger for a jacket mentions its type, but is not that garment.
+    purpose_pattern = r"\b(?:dlya|for)\s+(?:[a-z]+\s+){0,2}" + re.escape(latin_primary)
+    purpose = re.search(purpose_pattern, _transliterate(title))
+    requested_purpose = re.search(purpose_pattern, _transliterate(query))
+    if purpose and not requested_purpose:
+        return False
+    if "женск" in query.casefold() and re.search(r"\b(?:мужск|детск|мальчик|девочк)", title):
+        return False
+    host = (urlparse(match.get("url") or "").hostname or "").casefold()
+    return host.endswith(".kz") or host in {"kaspi.kz", "satu.kz", "wildberries.ru"}

@@ -6,7 +6,11 @@ from app.services.market_search import (
     _decode_ddg_url,
     _matching_models,
     _parse_duckduckgo_results,
+    _primary_query,
+    _relevant_candidates,
+    _relevant_result,
     _unique_results,
+    search_products,
 )
 from app.services.product_pages import parse_product_page
 from app.services.product_matching import _type_check, evaluate_product_leads
@@ -58,6 +62,73 @@ def test_repeat_blocked_result_does_not_replace_already_verified_card():
     blocked = {"url": verified["url"], "page_verified": False, "seller_phone": None}
     assert _unique_results([blocked, verified]) == [verified]
     assert _unique_results([verified, blocked]) == [verified]
+
+
+@pytest.mark.parametrize("title", [
+    "Чехол MILDOM 60x100 см", "Боди женское", "Комплект желтый", "Вешалка для жакета",
+    "Перчатки женские", "Манекен женский", "Корм Jarvi", "Пуловер женский",
+])
+def test_unrelated_marketplace_cards_are_not_jackets_even_with_a_price(title):
+    row = {"title": title, "price": 2000, "url": "https://kaspi.kz/shop/p/unrelated-123456/"}
+    assert not _relevant_result(row, "Жакет женский на замке из плотной вязки")
+
+
+def test_generic_query_keeps_the_type_and_supported_inflected_titles():
+    query = "Жакет женский на замке из плотной вязки"
+    assert _primary_query(query) == "Жакет женский"
+    assert _primary_query("Philips FC9734/01") == "Philips FC9734/01"
+    assert _relevant_result({"title": "Жакет женский трикотажный на молнии", "url": "https://shop.example.kz/product/1"}, query)
+    assert not _relevant_result({"title": "Жакет мужской", "url": "https://shop.example.kz/product/2"}, query)
+
+
+def test_transliterated_vendor_slugs_keep_genuine_types_but_not_their_accessories():
+    from app.services.market_search import _satu_product_results
+
+    rows = _satu_product_results(
+        '<a href="/p123456789-zhaket-zhenskij-trikotazhnyj.html">Жакет</a>'
+        '<a href="/p123456780-chehol-dlya-zhaketa.html">Чехол</a>'
+    )
+    relevant = _relevant_candidates(rows, "Жакет женский на замке из плотной вязки")
+    assert [row["url"] for row in relevant] == ["https://satu.kz/p123456789-zhaket-zhenskij-trikotazhnyj.html"]
+
+
+@pytest.mark.parametrize("title", ["Средство для мытья посуды Fairy 500 мл", "Гель для посуды 500 мл"])
+def test_requested_detergent_purpose_is_not_mistaken_for_an_accessory(title):
+    assert _relevant_result({"title": title, "url": "https://shop.example.kz/product/1"}, "Моющее средство для посуды")
+
+
+@pytest.mark.asyncio
+async def test_all_discovery_sources_filter_before_and_after_page_enrichment(monkeypatch):
+    from app.core.config import settings
+    from app.services import market_search
+
+    query = "Жакет женский на замке из плотной вязки"
+    seen_queries = []
+    enrichment_titles = []
+    unrelated = {"title": "Корм Jarvi", "price": 2000, "url": "https://kaspi.kz/shop/p/feed-123456/"}
+    candidate = {"title": "Жакет женский", "url": "https://kaspi.kz/shop/p/jacket-123456/"}
+
+    async def search(search_query, *_args):
+        seen_queries.append(search_query)
+        return [dict(unrelated), dict(candidate)]
+
+    async def enrich(rows):
+        enrichment_titles.extend(row["title"] for row in rows)
+        # A search hit can lead to a replaced or redirected unrelated product.
+        return [{**row, "title": "Манекен женский", "is_product_page": True, "page_verified": True} for row in rows]
+
+    monkeypatch.setattr(settings, "GOOGLE_CSE_API_KEY", "test")
+    monkeypatch.setattr(settings, "GOOGLE_CSE_ID", "test")
+    monkeypatch.setattr(market_search, "_google_cse", search)
+    monkeypatch.setattr(market_search, "_duckduckgo", search)
+    monkeypatch.setattr(market_search, "_satu_search", search)
+    monkeypatch.setattr(market_search, "enrich_product_pages", enrich)
+    rows = await search_products(query)
+
+    assert seen_queries[0] == "Жакет женский"
+    assert enrichment_titles and all(title == "Жакет женский" for title in enrichment_titles)
+    assert rows and all(not row.get("is_product_page") for row in rows)
+    assert not _relevant_candidates([unrelated], query)
 
 
 def test_vendor_storefront_phone_spans_are_captured_but_buyer_phone_is_not():

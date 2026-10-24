@@ -50,8 +50,9 @@ def _build_search_query(product_name: str, specs: Optional[str]) -> str:
         return f"{base_name} {measure.group(1)}"[:120]
     if len(name) > 90:
         return name[:120]
-    first_detail = re.split(r"[.;]", details, maxsplit=1)[0].strip()
-    return f"{name} {first_detail}"[:120].strip()
+    # Generic specifications may begin with procurement prose or duplicate
+    # the name; including it can make search engines return unrelated items.
+    return name[:120]
 
 
 def _region_of(company) -> Optional[str]:

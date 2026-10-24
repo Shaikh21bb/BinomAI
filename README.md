@@ -15,7 +15,7 @@
 **Казахстан • Строительство • AI**
 
 [![Status](https://img.shields.io/badge/Status-Production-success?style=for-the-badge)](https://binom-ai-vprod.vercel.app)
-[![Release](https://img.shields.io/badge/Release-v1.5.1-blue?style=for-the-badge)](https://github.com/Shaikh21bb/BinomAI/releases)
+[![Release](https://img.shields.io/badge/Release-v1.5.2-blue?style=for-the-badge)](https://github.com/Shaikh21bb/BinomAI/releases)
 [![Market](https://img.shields.io/badge/Market-Kazakhstan-green?style=for-the-badge)](/)
 [![Stack](https://img.shields.io/badge/Stack-Next.js%20%7C%20FastAPI%20%7C%20Supabase%20%7C%20AI-purple?style=for-the-badge)](/)
 
@@ -43,6 +43,8 @@
 - 📥 **Экспортирует** финальные документы в DOCX / PDF
 
 Отдельный сценарий **Quick Check** извлекает позиции из PDF и Word (.docx), ищет публичные предложения поставщиков, сопоставляет характеристики и остатки, сохраняет приватную историю проверок и позволяет повторить поиск без повторной загрузки документа.
+
+В версии **1.5.2** поиск по общим названиям дополнительно отсекает нерелевантные товарные страницы: наличие цены или ссылки магазина само по себе не делает результат подходящим кандидатом.
 
 В версии **1.5.1** расширено извлечение позиций из PDF госзакупок и таблиц Word, согласованы карточки, счётчики, фильтры и CSV. Найденные кандидаты отделены от подтверждённых совпадений; публичные контакты сохраняются со ссылкой на источник. Полное соответствие ТЗ и фактическое наличие требуют отдельной проверки.
 

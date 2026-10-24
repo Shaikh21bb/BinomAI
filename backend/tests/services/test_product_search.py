@@ -108,6 +108,12 @@ def test_search_query_prefers_brand_and_model_hidden_in_tender_prose():
     assert query == "Philips FC9734/01"
 
 
+def test_generic_search_query_does_not_append_long_tender_prose():
+    name = "Жакет женский на замке из плотной вязки"
+    query = _build_search_query(name, "Жакет женский шерстяной. Горловина круглая; ГОСТ 25295-2003")
+    assert query == name
+
+
 def test_extract_price_tenge():
     assert _extract_price("Цена: 25 000 тенге") == 25000.0
     assert _extract_price("25 000 ₸") == 25000.0
