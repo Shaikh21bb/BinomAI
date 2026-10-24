@@ -3,35 +3,10 @@
 import { useState } from 'react';
 import Image, { type ImageLoaderProps } from 'next/image';
 import { assessStock, displayUnit } from '@/lib/productStock';
+import { canRecommendProductLead, isProductCardLead, isVerifiedProductLead, productVerificationScope, publishedProductPhones, visibleProductLeads, type DiscoveryLead } from '@/lib/productDiscovery';
 
-export interface DiscoveryCheck {
-  id?: string;
-  requirement: string;
-  status: 'matched' | 'mismatch' | 'unknown';
-  evidence?: string;
-}
-
-export interface DiscoveryLead {
-  title?: string;
-  url?: string;
-  shop?: string;
-  snippet?: string;
-  description?: string;
-  image_url?: string | null;
-  price?: number | null;
-  currency?: string | null;
-  availability?: string | null;
-  stock_quantity?: number | null;
-  stock_unit?: string | null;
-  seller_name?: string | null;
-  seller_phone?: string | null;
-  seller_phones?: string[];
-  characteristics?: Record<string, string>;
-  is_product_page?: boolean;
-  page_verified?: boolean;
-  match_status?: 'matched' | 'partial' | 'mismatch' | 'unknown' | 'unverified';
-  checks?: DiscoveryCheck[];
-}
+export { isProductCardLead, isVerifiedProductLead, productLeadScore } from '@/lib/productDiscovery';
+export type { DiscoveryCheck, DiscoveryLead } from '@/lib/productDiscovery';
 
 interface Props {
   productName: string;
@@ -42,15 +17,6 @@ interface Props {
   addingUrl?: string | null;
   disabled?: boolean;
   onAddOffer?: (lead: DiscoveryLead) => void | Promise<void>;
-}
-
-export function isVerifiedProductLead(lead: DiscoveryLead) {
-  const typeCheck = lead.checks?.find((check) => check.id === 'type') ?? lead.checks?.[0];
-  return Boolean(lead.is_product_page && lead.page_verified && typeCheck?.status === 'matched');
-}
-
-export function isProductCardLead(lead: DiscoveryLead) {
-  return Boolean(lead.is_product_page);
 }
 
 export function isAutoComparableLead(
@@ -66,26 +32,9 @@ export function isAutoComparableLead(
   );
 }
 
-export function productLeadScore(lead: DiscoveryLead) {
-  const matchPoints = { matched: 500, partial: 350, unknown: 200, unverified: 100, mismatch: 0 };
-  const checks = lead.checks ?? [];
-  const validImage = Boolean(
-    lead.image_url && /^https?:\/\//i.test(lead.image_url) && !imageNoise.test(lead.image_url)
-  );
-  return (
-    matchPoints[lead.match_status ?? 'unknown'] +
-    checks.filter((check) => check.status === 'matched').length * 12 -
-    checks.filter((check) => check.status === 'mismatch').length * 20 +
-    (validImage ? 70 : 0) +
-    (lead.price != null ? 55 : 0) +
-    (lead.availability === 'InStock' ? 30 : 0) +
-    (lead.stock_quantity != null && lead.stock_quantity > 0 ? 15 : 0)
-  );
-}
-
 const tones = {
   matched: {
-    label: 'Все требования подтверждены',
+    label: 'Все выделенные требования подтверждены',
     cls: 'border-emerald-200 bg-emerald-50 text-emerald-800',
     icon: 'verified',
   },
@@ -179,6 +128,7 @@ function ProductCard({
       { mismatch: 0, unknown: 1, matched: 2 }[b.status]
   );
   const confirmed = checks.filter((check) => check.status === 'matched').length;
+  const verification = productVerificationScope(lead);
   const tone = tones[lead.match_status ?? 'unknown'];
   const name = lead.title || 'Товар без названия';
   const price =
@@ -206,9 +156,7 @@ function ProductCard({
     onAddOffer && lead.url && lead.price != null && Number.isFinite(Number(lead.price))
   );
   const seller = lead.seller_name || lead.shop || 'Продавец не указан';
-  const sellerPhones = Array.from(
-    new Set([...(lead.seller_phones ?? []), lead.seller_phone].filter(Boolean) as string[])
-  );
+  const sellerPhones = publishedProductPhones(lead);
 
   return (
     <article className="flex h-full flex-col gap-3 rounded-2xl border border-outline-variant bg-surface-container-lowest p-4 shadow-sm transition-shadow hover:shadow-md">
@@ -236,7 +184,7 @@ function ProductCard({
           <div className="mt-1.5 flex items-start gap-1.5">
             <span className="material-symbols-outlined mt-0.5 text-[16px]">call</span>
             <span>
-              <span className="font-medium text-on-surface">Телефон продавца:</span>{' '}
+              <span className="font-medium text-on-surface">Телефон на странице источника:</span>{' '}
               {sellerPhones.map((phone, index) => (
                 <span key={phone}>
                   {index > 0 && ' · '}
@@ -250,7 +198,7 @@ function ProductCard({
         ) : (
           <p className="mt-1.5 flex items-center gap-1.5">
             <span className="material-symbols-outlined text-[16px]">phone_disabled</span>
-            Телефон продавца не опубликован
+            Телефон на странице не найден
           </p>
         )}
       </div>
@@ -261,7 +209,7 @@ function ProductCard({
         className={`inline-flex w-fit items-center gap-1.5 rounded-full border px-2.5 py-1 text-label-sm font-label-sm ${tone.cls}`}
       >
         <span className="material-symbols-outlined text-[16px]">{tone.icon}</span>
-        {tone.label}
+        {verification.label || tone.label}
       </span>
       <p className="flex items-center gap-1.5 text-label-sm text-on-surface-variant">
         <span className="material-symbols-outlined text-[16px]">inventory</span>
@@ -286,7 +234,7 @@ function ProductCard({
         </p>
       )}
       <p className="text-label-sm text-on-surface-variant">
-        По ТЗ подтверждено {confirmed} из {checks.length} требований
+        {verification.explanation || (checks.length ? `По ТЗ подтверждено ${confirmed} из ${checks.length} выделенных требований` : 'Характеристики кандидата ещё не подтверждены')}
       </p>
       {!!checks.length && (
         <details className="rounded-xl bg-surface-container-low p-3 text-body-sm open:pb-4">
@@ -363,10 +311,8 @@ export function ProductDiscoveryCards({
   disabled = false,
   onAddOffer,
 }: Props) {
-  const products = leads
-    .filter(isProductCardLead)
-    .sort((a, b) => productLeadScore(b) - productLeadScore(a))
-    .slice(0, 8);
+  const products = visibleProductLeads(leads);
+  const confirmedTypes = products.filter(isVerifiedProductLead).length;
   const searchLinks = leads.filter((lead) => !isProductCardLead(lead) && lead.url).slice(0, 6);
   const existingUrls = new Set(existingOfferUrls);
 
@@ -383,7 +329,7 @@ export function ProductDiscoveryCards({
           </p>
         </div>
         <span className="rounded-full bg-primary/10 px-2.5 py-1 text-label-sm text-primary">
-          {products.length} карточек
+          {products.length} карточек · тип подтверждён: {confirmedTypes}
         </span>
       </div>
       {products.length ? (
@@ -394,7 +340,7 @@ export function ProductDiscoveryCards({
               lead={lead}
               requestedQuantity={requestedQuantity}
               requestedUnit={requestedUnit}
-              recommended={index === 0 && lead.match_status !== 'mismatch'}
+              recommended={index === 0 && canRecommendProductLead(lead)}
               added={Boolean(lead.url && existingUrls.has(lead.url))}
               adding={Boolean(lead.url && addingUrl === lead.url)}
               disabled={disabled}

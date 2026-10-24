@@ -16,6 +16,10 @@ def test_clean_text():
     assert "Wordbroken" in cleaned
     assert "\n\n\n" not in cleaned
 
+
+def test_clean_text_preserves_standalone_table_numbers():
+    assert DocumentParser.clean_text("Количество:\n20\nЕдиница измерения:\nШтука") == "Количество:\n20\nЕдиница измерения:\nШтука"
+
 def test_extract_metadata():
     text = (
         "Техническая спецификация № 123-А\n"
@@ -75,6 +79,22 @@ def test_extract_from_docx_rejects_incomplete_zip_package():
 
     with pytest.raises(ValueError, match="missing required parts"):
         DocumentParser.extract_from_docx(stream.getvalue())
+
+
+def test_extract_from_docx_preserves_document_order_and_empty_table_cells():
+    stream = io.BytesIO()
+    document = Document()
+    document.add_paragraph("Первый раздел")
+    table = document.add_table(rows=1, cols=4)
+    for cell, value in zip(table.rows[0].cells, ["Жакет женский", "", "шт", "20"]):
+        cell.text = value
+    document.add_paragraph("Второй раздел")
+    document.save(stream)
+
+    extracted = DocumentParser.extract_from_docx(stream.getvalue())
+
+    assert "Жакет женский |  | шт | 20" in extracted
+    assert extracted.index("Первый раздел") < extracted.index("Жакет женский") < extracted.index("Второй раздел")
 
 # --- Task Tests ---
 @pytest.fixture

@@ -1,12 +1,15 @@
 import re
 import asyncio
+import html
+from html.parser import HTMLParser
 import structlog
 import httpx
 from typing import List, Dict, Any, Optional
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import parse_qs, quote, urljoin, urlparse, unquote
 
 from app.core.config import settings
-from app.services.product_pages import fetch_product_page, looks_like_product_url
+from app.services.product_identity import contains_model, model_identifiers
+from app.services.product_pages import fetch_product_page, is_public_url, looks_like_product_url
 
 logger = structlog.get_logger(__name__)
 
@@ -16,7 +19,7 @@ MARKETPLACES = [
     {"name": "Satu.kz", "url": "https://satu.kz/search?search_term={q}"},
     {"name": "Alser.kz", "url": "https://alser.kz/search?q={q}"},
     {"name": "Sulpak.kz", "url": "https://www.sulpak.kz/f/{q}"},
-    {"name": "Technodom.kz", "url": "https://www.technodom.kz/katatalog/search/?q={q}"},
+    {"name": "Technodom.kz", "url": "https://www.technodom.kz/search?recommended_by=search&q={q}"},
     {"name": "Wildberries.kz", "url": "https://www.wildberries.kz/catalog/0/search.aspx?search={q}"},
 ]
 
@@ -37,7 +40,7 @@ async def search_products(query: str, region: Optional[str] = None) -> List[Dict
         if settings.GOOGLE_CSE_API_KEY and settings.GOOGLE_CSE_ID:
             google_results = await _google_cse(q, region)
             if google_results:
-                results = await enrich_product_pages(google_results[:8])
+                results = await enrich_product_pages(_matching_models(google_results, query)[:8])
                 if sum(bool(row.get("is_product_page")) for row in results) >= 6:
                     return results
     except Exception as e:
@@ -45,7 +48,9 @@ async def search_products(query: str, region: Optional[str] = None) -> List[Dict
 
     try:
         ddg = await _duckduckgo(query, region)
-        filtered = [r for r in ddg if _looks_like_price(r) or _looks_like_product_page(r) or _relevant_result(r, query)]
+        filtered = _matching_models([
+            r for r in ddg if _looks_like_price(r) or _looks_like_product_page(r) or _relevant_result(r, query)
+        ], query)
         if filtered:
             enriched = await enrich_product_pages(filtered[:8])
             results = _unique_results(results + enriched)
@@ -72,7 +77,7 @@ async def search_products(query: str, region: Optional[str] = None) -> List[Dict
             for row in batch
             if looks_like_product_url(row.get("url") or "")
         ])
-        candidates = await enrich_product_pages(concrete_urls[:8])
+        candidates = await enrich_product_pages(_matching_models(concrete_urls, query)[:8])
         results = _unique_results(candidates + results)
     except Exception as e:
         logger.warning("targeted_product_search_failed", error_type=type(e).__name__)
@@ -123,14 +128,26 @@ async def _satu_search(query: str, region: Optional[str]) -> List[Dict[str, Any]
 
 
 def _unique_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    seen: set[str] = set()
-    unique = []
+    unique: dict[str, Dict[str, Any]] = {}
     for row in results:
         url = row.get("url") or ""
-        if url and url not in seen:
-            seen.add(url)
-            unique.append(row)
-    return unique
+        if not url:
+            continue
+        previous = unique.get(url)
+        # A blocked repeat lookup must not overwrite a page already read in this run.
+        if previous is None or (row.get("page_verified") and not previous.get("page_verified")):
+            unique[url] = row
+    return list(unique.values())
+
+
+def _matching_models(results: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+    models = model_identifiers(query)
+    if not models:
+        return results
+    return [row for row in results if all(
+        contains_model(f"{row.get('title') or ''} {unquote(row.get('url') or '')}", model)
+        for model in models
+    )]
 
 
 async def _google_cse(q: str, region: Optional[str]) -> List[Dict[str, Any]]:
@@ -180,16 +197,46 @@ async def _duckduckgo(query: str, region: Optional[str]) -> List[Dict[str, Any]]
         resp.raise_for_status()
         html_text = resp.text
 
+    return _parse_duckduckgo_results(html_text, region)
+
+
+class _DuckDuckGoParser(HTMLParser):
+    """The result anchor is stable even when DDG changes its nested div layout."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.results: list[dict[str, str]] = []
+        self.capture: tuple[str, str, list[str]] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
+        attributes = dict(attrs)
+        classes = (attributes.get("class") or "").split()
+        if tag == "a" and "result__a" in classes:
+            link = _decode_ddg_url(attributes.get("href") or "")
+            if is_public_url(link):
+                self.results.append({"url": link, "title": "", "snippet": ""})
+                self.capture = (tag, "title", [])
+        elif "result__snippet" in classes and self.results:
+            self.capture = (tag, "snippet", [])
+
+    def handle_data(self, data: str):
+        if self.capture:
+            self.capture[2].append(data)
+
+    def handle_endtag(self, tag: str):
+        if self.capture and self.capture[0] == tag:
+            self.results[-1][self.capture[1]] = " ".join("".join(self.capture[2]).split())
+            self.capture = None
+
+
+def _parse_duckduckgo_results(markup: str, region: Optional[str] = None) -> List[Dict[str, Any]]:
+    parser = _DuckDuckGoParser()
+    parser.feed(markup)
+    if not parser.results and re.search(r'challenge-form|anomaly-modal', markup, re.I):
+        logger.info("duckduckgo_search_challenged")
     results = []
-    # DuckDuckGo HTML results: <a class="result__a" href="...">title</a> ... <a class="result__snippet">...
-    for block in re.findall(r'<div class="result[^"]*".*?</div>\s*</div>\s*</div>', html_text, re.S)[:10]:
-        a = re.search(r'class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>', block, re.S)
-        if not a:
-            continue
-        link = _decode_ddg_url(a.group(1))
-        title = re.sub(r"<[^>]+>", "", a.group(2)).strip()
-        snip_m = re.search(r'class="result__snippet"[^>]*>(.*?)</a>', block, re.S)
-        snippet = re.sub(r"<[^>]+>", "", snip_m.group(1)).strip() if snip_m else ""
+    for row in parser.results[:10]:
+        title, snippet, link = row["title"], row["snippet"], row["url"]
         price = _extract_price(f"{title} {snippet}")
         results.append({
             "title": title,
@@ -206,12 +253,13 @@ async def _duckduckgo(query: str, region: Optional[str]) -> List[Dict[str, Any]]
 
 def _decode_ddg_url(href: str) -> str:
     """DuckDuckGo wraps target links; extract the real URL."""
-    if href.startswith("http") or href.startswith("https"):
-        return href
-    m = re.search(r"uddg=([^&]+)", href)
-    if m:
-        from urllib.parse import unquote
-        return unquote(m.group(1))
+    href = html.unescape(href)
+    parsed = urlparse(urljoin("https://duckduckgo.com", href))
+    if parsed.hostname in {"duckduckgo.com", "www.duckduckgo.com", "html.duckduckgo.com"}:
+        target = parse_qs(parsed.query).get("uddg", [None])[0]
+        if target and is_public_url(target):
+            return target
+        return ""
     return href
 
 
@@ -236,7 +284,7 @@ async def enrich_product_pages(results: List[Dict[str, Any]], limit: int = 8) ->
                     # A vendor may block automated reads even though the search result
                     # points to a concrete product URL. Keep it visible as an explicitly
                     # unverified candidate, without inventing price, photo, or specs.
-                    result["is_product_page"] = direct_product_candidate
+                    result["is_product_page"] = direct_product_candidate and not page.get("page_verified")
                     result["page_verified"] = False
                     result["image_url"] = None
                     result["price"] = None

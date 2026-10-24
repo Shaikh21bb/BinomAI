@@ -1,5 +1,9 @@
 from pypdf import PdfReader
 from docx import Document
+from docx.oxml.table import CT_Tbl
+from docx.oxml.text.paragraph import CT_P
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 import re
 import zipfile
 from datetime import date
@@ -58,17 +62,23 @@ class DocumentParser:
                     raise ValueError("DOCX package is missing required parts")
 
             doc = Document(io.BytesIO(file_bytes))
-            text_parts = [para.text for para in doc.paragraphs if para.text.strip()]
-
-            # Tables often carry the actual tender requirements
-            for table in doc.tables:
-                rows = []
-                for row in table.rows:
-                    cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-                    if cells:
-                        rows.append(" | ".join(cells))
-                if rows:
-                    text_parts.append("\n".join(rows))
+            text_parts = []
+            # Preserve paragraph/table order and empty columns: both matter when
+            # a document contains several lots and quantity/unit table columns.
+            for element in doc.element.body.iterchildren():
+                if isinstance(element, CT_P):
+                    paragraph = Paragraph(element, doc)
+                    if paragraph.text.strip():
+                        text_parts.append(paragraph.text)
+                elif isinstance(element, CT_Tbl):
+                    table = Table(element, doc)
+                    rows = []
+                    for row in table.rows:
+                        cells = [cell.text.strip() for cell in row.cells]
+                        if any(cells):
+                            rows.append(" | ".join(cells))
+                    if rows:
+                        text_parts.append("\n".join(rows))
         except Exception as e:
             raise ValueError(f"Failed to parse DOCX: {str(e)}")
             
@@ -94,8 +104,8 @@ class DocumentParser:
         # 3. Join words broken by hyphens at the end of a line
         text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', text)
         
-        # 4. Remove common standalone page numbers (e.g., lines with just a number)
-        text = re.sub(r'(?m)^\s*\d+\s*$', '', text)
+        # Standalone numbers can be table values (quantity, dimensions or a lot
+        # number), not just page numbers. Removing them destroys labelled specs.
         
         return text.strip()
 

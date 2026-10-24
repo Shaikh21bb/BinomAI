@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 
 # Units commonly used in construction/material specs
 _UNITS = (
-    r"(?:м2|м³|м3|м\s?кв\.?|м\s?куб\.?|п\.?\s?м\.?|пог\.?\s?м\.?|шт\.?|компл\.?|кг|т|тн|л|л\.?|га|млн\.?\s?тенге|тенге|₸)"
+    r"(?:м2|м³|м3|м\s?кв\.?|м\s?куб\.?|п\.?\s?м\.?|пог\.?\s?м\.?|шт(?:ука|уки|ук)?\.?|дана|комплект|компл\.?|кг|тн|т|л\.?|га)"
 )
 
 # Rows of a spec table like: | 1 | Металлочерепица | 0,5 мм | м2 | 789,1 |
@@ -29,17 +29,28 @@ _QTY_END_RE = re.compile(r"(\d{1,6}(?:[\s,\.]\d{1,3}){0,3})\s*$")
 
 _STOPWORDS = {"наименование", "кол-во", "количество", "ед", "изм", "единица", "изм.", "№", "номер", "показатель"}
 
+_EXPLICIT_REQUIREMENTS = re.compile(
+    r"^[ \t]*(?:Требуемые характеристики|Технические характеристики|Технические требования|Характеристики товара)[ \t]*:[ \t]*(.*)$",
+    re.IGNORECASE,
+)
+_COMMERCIAL_OR_CONTACT_TEXT = re.compile(
+    r"(?:\b(?:цен\w*|стоимост\w*|остатк\w*|наличи\w*|контакт\w*|телефон\w*|продав\w*|"
+    r"поставщик\w*|доставк\w*|оплат\w*|провер\w*|магазин\w*)\b|https?://|www\.|@|₸|\bтенге\b)",
+    re.IGNORECASE,
+)
+
 _RU_TENDER_FIELDS = {
-    "item_number": ("Номер пункта плана",),
-    "name": ("Наименование пункта плана",),
-    "description": ("Описание пункта плана",),
-    "short_description": ("Дополнительное описание пункта плана",),
+    "item_number": ("Номер пункта плана", "Номер лота"),
+    "name": ("Наименование пункта плана", "Наименование лота"),
+    "description": ("Описание пункта плана", "Описание лота"),
+    "short_description": ("Дополнительное описание пункта плана", "Дополнительное описание лота"),
     "quantity": ("Количество",),
     "unit": ("Единица измерения",),
     "delivery_location": ("Места поставки", "Место поставки"),
     "delivery_terms": ("Срок поставки",),
     "requirements": (
         "Описание требуемых функциональных, технических, качественных, эксплуатационных и иных характеристик закупаемого товара",
+        "Описание и требуемые функциональные, технические, качественные и эксплуатационные характеристики закупаемых товаров",
     ),
 }
 
@@ -54,6 +65,7 @@ _KK_TENDER_FIELDS = {
     "delivery_terms": ("Жеткізу мерзімі",),
     "requirements": (
         "Сатып алынатын тауарлардың қажетті функциональдық, техникалық, сапалық, өнімділігі мен басқа да сипаттамаларының сипатталуы",
+        "Функционалдық, техникалық, сапалық және пайдалану мінездемесін сипаттау",
     ),
 }
 
@@ -69,6 +81,9 @@ def extract_products_from_text(text: str) -> List[Dict[str, Any]]:
 
     products: List[Dict[str, Any]] = []
     seen = set()
+    table_rows: List[int] = []
+    lines = text.splitlines()
+    in_requirements = False
 
     def add(item: Dict[str, Any]):
         key = (item.get("product_name") or "").strip().lower()
@@ -80,9 +95,18 @@ def extract_products_from_text(text: str) -> List[Dict[str, Any]]:
         products.append(item)
 
     # 1. Table rows: | № | Name | Spec | Unit | Qty |
-    for line in text.splitlines():
+    for line_index, line in enumerate(lines):
+        if _EXPLICIT_REQUIREMENTS.match(line):
+            in_requirements = True
+            continue
+        if in_requirements:
+            if not line.strip() or "|" in line:
+                in_requirements = False
+            else:
+                continue
         m = _ROW_RE.match(line.strip())
         if m:
+            table_rows.append(line_index)
             add({
                 "product_name": m.group(2).strip(),
                 "specs": m.group(3).strip() or None,
@@ -92,31 +116,11 @@ def extract_products_from_text(text: str) -> List[Dict[str, Any]]:
             })
             continue
 
-        # 2. Table rows without №: | Name | Qty | Unit |  or  | Name | Spec | Unit | Qty |
-        parts = [p.strip() for p in line.strip().strip("|").split("|")]
-        if len(parts) >= 3:
-            name = parts[0]
-            if _looks_like_product(name):
-                # Try (name, spec, unit, qty)
-                if len(parts) >= 4 and re.search(_UNITS, parts[-2], re.IGNORECASE) and re.search(r"\d", parts[-1]):
-                    add({
-                        "product_name": name,
-                        "specs": parts[1] or None,
-                        "unit": parts[-2],
-                        "quantity": _parse_qty(parts[-1]),
-                        "source_section": _section_of(line, text),
-                    })
-                    continue
-                # Try (name, qty, unit)
-                if re.search(r"\d", parts[1]) and re.search(_UNITS, parts[2], re.IGNORECASE):
-                    add({
-                        "product_name": name,
-                        "specs": None,
-                        "unit": parts[2],
-                        "quantity": _parse_qty(parts[1]),
-                        "source_section": _section_of(line, text),
-                    })
-                    continue
+        table_product = _extract_simple_table_row(line)
+        if table_product:
+            table_rows.append(line_index)
+            add({**table_product, "source_section": _section_of(line, text)})
+            continue
 
         # 3. Line with unit + qty at end
         m3 = re.search(r"^(.*?)(?:м2|м³|м3|п\.?\s?м\.?|шт\.?|кг|тн?|л\.?)\s+([\d\s,\.]{2,})$", line.strip(), re.IGNORECASE)
@@ -141,7 +145,39 @@ def extract_products_from_text(text: str) -> List[Dict[str, Any]]:
                 "source_section": _section_of(line, text),
             })
 
+    if len(products) == 1 and len(table_rows) == 1:
+        trailing_specs = _single_table_product_requirements(lines[table_rows[0] + 1:])
+        if trailing_specs:
+            products[0]["specs"] = "; ".join(part for part in (products[0].get("specs"), trailing_specs) if part)
     return products
+
+
+def _single_table_product_requirements(lines: List[str]) -> Optional[str]:
+    """Attach only an explicit adjacent requirements paragraph to one table item.
+
+    Shared requirements for multiple products require human mapping. Commercial
+    instructions and seller contacts are never interpreted as product specs.
+    """
+    tail = "\n".join(lines).lstrip()
+    if not tail:
+        return None
+    first_line, *remaining_lines = tail.splitlines()
+    heading = _EXPLICIT_REQUIREMENTS.match(first_line)
+    if not heading:
+        return None
+    fragments = [heading.group(1)]
+    for line in remaining_lines:
+        if not line.strip() or "|" in line or re.match(r"^[^:]{1,80}:\s*", line):
+            break
+        fragments.append(line.strip())
+    sentences = re.split(r"(?<=[.!?;])\s+", " ".join(fragments).strip())
+    technical = []
+    for sentence in sentences:
+        if _COMMERCIAL_OR_CONTACT_TEXT.search(sentence):
+            break
+        if sentence:
+            technical.append(sentence)
+    return " ".join(technical)[:2000] or None
 
 
 def _extract_labeled_tender_products(text: str) -> List[Dict[str, Any]]:
@@ -159,36 +195,40 @@ def _extract_labeled_tender_products(text: str) -> List[Dict[str, Any]]:
 
 
 def _join_wrapped_tender_labels(text: str) -> str:
-    replacements = {
-        r"(?im)^\s*Дополнительное описание\s*\n\s*пункта плана\s*:": "Дополнительное описание пункта плана:",
-        r"(?ims)^\s*Описание требуемых\s+функциональных,\s*технических,\s*качественных,\s*эксплуатационных и иных\s+характеристик закупаемого\s+товара\s*:": "Описание требуемых функциональных, технических, качественных, эксплуатационных и иных характеристик закупаемого товара:",
-        r"(?ims)^\s*Сатып алынатын тауарлардың\s+қажетті функциональдық,\s*техникалық,\s*сапалық,\s*өнімділігі\s+мен басқа да сипаттамаларының\s+сипатталуы\s*:": "Сатып алынатын тауарлардың қажетті функциональдық, техникалық, сапалық, өнімділігі мен басқа да сипаттамаларының сипатталуы:",
-    }
-    for pattern, replacement in replacements.items():
-        text = re.sub(pattern, replacement, text)
+    # PDF table labels wrap at arbitrary words. DOCX tables serialize the same
+    # label/value pair with a pipe between cells. Normalize both before parsing.
+    aliases = {alias for fields in (_RU_TENDER_FIELDS, _KK_TENDER_FIELDS)
+               for labels in fields.values() for alias in labels}
+    for alias in sorted(aliases, key=len, reverse=True):
+        label = r"\s+".join(re.escape(word) for word in alias.split())
+        separator = r"(?:\s*:\s*(?:\|[ \t]*)?|[ \t]*\|[ \t]*)"
+        text = re.sub(rf"(?im)^[ \t]*{label}{separator}", f"{alias}: ", text)
     return text
 
 
 def _extract_language_blocks(text: str, fields: Dict[str, tuple[str, ...]]) -> List[Dict[str, Any]]:
-    item_label = re.escape(fields["item_number"][0])
-    chunks = re.split(rf"(?im)(?=^\s*{item_label}\s*:)", text)
+    item_labels = "|".join(re.escape(alias) for language in (_RU_TENDER_FIELDS, _KK_TENDER_FIELDS)
+                           for alias in language["item_number"])
+    chunks = re.split(rf"(?im)(?=^[ \t]*(?:{item_labels})\s*:)", text)
     products: List[Dict[str, Any]] = []
     seen_numbers = set()
     for chunk in chunks:
         values = _parse_labeled_values(chunk, fields)
-        number_match = re.search(r"\d{5,}", values.get("item_number", ""))
+        number_match = re.search(r"\d{5,}(?:-[\w]+)?", values.get("item_number", ""))
         if not number_match:
             continue
         item_number = number_match.group(0)
         if item_number in seen_numbers:
             continue
-        seen_numbers.add(item_number)
-
         product_name = values.get("short_description") or " ".join(
             part for part in (values.get("name"), values.get("description")) if part
         )
         if not values.get("quantity") or not _looks_like_product(product_name):
             continue
+        quantity = _parse_qty(values["quantity"])
+        if quantity is None:
+            continue
+        seen_numbers.add(item_number)
         spec_parts = [values.get("requirements")]
         if values.get("delivery_location"):
             spec_parts.append(f"Место поставки: {values['delivery_location']}")
@@ -198,8 +238,8 @@ def _extract_language_blocks(text: str, fields: Dict[str, tuple[str, ...]]) -> L
             "product_name": product_name[:500],
             "specs": "; ".join(part for part in spec_parts if part) or values.get("description"),
             "unit": values.get("unit"),
-            "quantity": _parse_qty(values["quantity"]) if values.get("quantity") else None,
-            "source_section": f"Пункт плана № {item_number}",
+            "quantity": quantity,
+            "source_section": f"{'Пункт плана' if chunk.lstrip().lower().startswith('номер пункта плана') else 'Лот'} № {item_number}",
         })
     return products
 
@@ -231,11 +271,39 @@ def _parse_labeled_values(text: str, fields: Dict[str, tuple[str, ...]]) -> Dict
 
 
 def _parse_qty(raw: str):
-    raw = raw.replace(" ", "").replace(",", ".")
+    raw = re.sub(r"\s+", "", raw).replace(",", ".")
     try:
         return float(raw)
     except ValueError:
         return None
+
+
+def _extract_simple_table_row(line: str) -> Optional[Dict[str, Any]]:
+    """Read common Word tables without mistaking dates/prices for quantities."""
+    if "|" not in line:
+        return None
+    parts = [part.strip() for part in line.strip().strip("|").split("|")]
+    if len(parts) > 2 and re.fullmatch(r"\d+[.)]?", parts[0]):
+        parts = parts[1:]
+    if len(parts) < 2 or not _looks_like_product(parts[0]):
+        return None
+    amount_pattern = r"\d+(?:[\s\u00a0\u202f]\d{3})*(?:[.,]\d+)?"
+    quantity = None
+    unit = None
+    spec_end = len(parts) - 1
+    combined = re.fullmatch(rf"({amount_pattern})\s*({_UNITS})", parts[-1], re.IGNORECASE)
+    if combined:
+        quantity, unit = _parse_qty(combined.group(1)), combined.group(2)
+    elif len(parts) >= 3:
+        for unit_index, quantity_index in ((-1, -2), (-2, -1)):
+            if re.fullmatch(_UNITS, parts[unit_index], re.IGNORECASE) and re.fullmatch(amount_pattern, parts[quantity_index]):
+                quantity, unit = _parse_qty(parts[quantity_index]), parts[unit_index]
+                spec_end = len(parts) - 2
+                break
+    if quantity is None or unit is None:
+        return None
+    return {"product_name": parts[0], "specs": " | ".join(parts[1:spec_end]) or None,
+            "quantity": quantity, "unit": unit}
 
 
 def _unit_of(line: str) -> str:

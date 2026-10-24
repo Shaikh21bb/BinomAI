@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
+from app.services.product_identity import contains_model, model_identifiers
 
 
 _IMAGE_NOISE = re.compile(r"favicon|logo|sprite|placeholder|/watch/|portal-portable|base_satu|pixel", re.I)
@@ -22,7 +23,8 @@ _PRODUCT_PATH = re.compile(
 _GENERIC_TITLE_WORDS = {"средс", "моющ", "товар", "купит", "ценам", "посуд", "коста"}
 _STOCK_TEXT = re.compile(r"(?:в наличии|на складе|остаток)\s*:?\s*(\d{1,6})\s*(шт\.?|штук|ед\.?|единиц|упак\.?|упаковок)\b", re.I)
 _SATU_PHONE = re.compile(r"PhoneDescription:(\+7\s*\(\d{3}\)\s*\d{3}[-\s]\d{2}[-\s]\d{2})", re.I)
-_TEL_LINK = re.compile(r'href=["\']tel:([^"\']+)["\']', re.I)
+_PHONE_TEXT = re.compile(r"(?<!\d)(?:\+7|8)\s*\(?\d{3}\)?[\s.-]*\d{3}[\s.-]*\d{2}[\s.-]*\d{2}(?!\d)")
+_MARKETPLACE_HOSTS = {"satu.kz", "kaspi.kz", "ozon.kz", "wildberries.kz", "wildberries.ru"}
 
 
 def is_public_url(url: str) -> bool:
@@ -114,13 +116,70 @@ def _stock_quantity(offer: dict[str, Any], description: str, properties: dict[st
     return None, None
 
 
-def _seller_details(offer: dict[str, Any], markup: str) -> tuple[str | None, list[str]]:
+class _SellerContactParser(HTMLParser):
+    """Read labelled company contacts, avoiding product descriptions and reviews."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack: list[tuple[str, bool, bool]] = []
+        self.text: list[str] = []
+        self.seller_links: list[str] = []
+        self.vendor_links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
+        attributes = dict(attrs)
+        context = " ".join(attributes.get(key) or "" for key in ("class", "id", "itemprop")).casefold()
+        inherited_seller = bool(self.stack and self.stack[-1][1])
+        ignored = bool(self.stack and self.stack[-1][2]) or tag in {"script", "style"} or bool(
+            re.search(r"description|review|comment", context)
+        )
+        seller_contact = inherited_seller or attributes.get("data-qaid") in {
+            "company_phones", "seller_phone", "seller_phones",
+        } or any(marker in context for marker in (
+            "b-sidebar-contacts__phone", "b-header-phones", "b-contacts__phone", "b-drop-phones__number",
+        ))
+        href = attributes.get("href") or ""
+        if href.casefold().startswith("tel:") and not ignored:
+            self.vendor_links.append(href[4:].split(";", 1)[0])
+            if seller_contact:
+                self.seller_links.append(href[4:].split(";", 1)[0])
+        if tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}:
+            self.stack.append((tag, seller_contact, ignored))
+
+    def handle_endtag(self, tag: str):
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                del self.stack[index:]
+                break
+
+    def handle_data(self, data: str):
+        if self.stack and self.stack[-1][1] and not self.stack[-1][2]:
+            self.text.append(data)
+
+
+def _seller_details(offer: dict[str, Any], markup: str, page_url: str) -> tuple[str | None, list[str]]:
     """Return only seller details explicitly published on the product page."""
     seller = offer.get("seller") or {}
     if not isinstance(seller, dict):
         seller = {}
     name = _clean(seller.get("name"), 200) or None
-    candidates = [seller.get("telephone"), *_TEL_LINK.findall(markup), *_SATU_PHONE.findall(markup)]
+    contacts = _SellerContactParser()
+    contacts.feed(markup)
+    host = (urlparse(page_url).hostname or "").removeprefix("www.")
+    marketplace = any(host == domain or host.endswith("." + domain) for domain in _MARKETPLACE_HOSTS)
+    points = seller.get("contactPoint") or []
+    if isinstance(points, dict):
+        points = [points]
+    published = seller.get("telephone")
+    candidates = (published if isinstance(published, list) else [published]) + [
+        point.get("telephone") for point in points if isinstance(point, dict)
+    ] + contacts.seller_links + _PHONE_TEXT.findall(" ".join(contacts.text))
+    if not marketplace:
+        # On a store's own domain tel links belong to that storefront. On a
+        # marketplace the footer phone may belong to platform support instead.
+        candidates += contacts.vendor_links
+    if name:
+        candidates += _SATU_PHONE.findall(markup)
     phones: list[str] = []
     seen: set[str] = set()
     for candidate in candidates:
@@ -159,6 +218,7 @@ class _PageParser(HTMLParser):
         self._heading: list[str] | None = None
         self.title = ""
         self.heading = ""
+        self.product_heading = False
         self.images: list[tuple[str, str]] = []
         self._row: list[str] | None = None
         self._cell: list[str] | None = None
@@ -176,6 +236,10 @@ class _PageParser(HTMLParser):
             self._title = []
         elif tag == "h1":
             self._heading = []
+            classes = (attributes.get("class") or "").split()
+            self.product_heading = self.product_heading or bool(set(classes) & {
+                "product_title", "product-title", "product__name", "product-name", "product_name",
+            })
         elif tag == "img":
             candidate = attributes.get("data-src") or attributes.get("data-lazy-src") or attributes.get("src")
             if not candidate and attributes.get("srcset"):
@@ -243,10 +307,19 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
     ):
         return {"is_product_page": False, "page_verified": True}
     page_title = _clean(parser.meta.get("og:title") or parser.title)
+    if re.search(r"^(?:404\b|access denied|just a moment|security check)|страниц[аы].*не найден", page_title, re.I):
+        return {"is_product_page": False, "page_verified": False}
     product_name = _clean((product or {}).get("name"))
     title_words = {word[:5] for word in re.findall(r"[a-zа-яё]{5,}", page_title.casefold())} - _GENERIC_TITLE_WORDS
     product_words = {word[:5] for word in re.findall(r"[a-zа-яё]{5,}", product_name.casefold())} - _GENERIC_TITLE_WORDS
-    name_on_page = not page_title or not product_name or len(title_words & product_words) >= 2
+    page_models = model_identifiers(parser.heading or page_title)
+    exact_name_on_page = bool(product_name and product_name.casefold() in page_title.casefold())
+    name_on_page = (not page_title or not product_name or exact_name_on_page or len(title_words & product_words) >= 2) and (
+        not page_models or all(contains_model(product_name, model) for model in page_models)
+    )
+    if product and not name_on_page:
+        # Recommendations embedded beside the main item are not its evidence.
+        product = None
     leaf = path.rstrip("/").rsplit("/", 1)[-1]
     concrete_catalog_leaf = bool(
         "/catalog/" in path.casefold()
@@ -256,8 +329,9 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
     )
     is_product = not _GENERIC_PATH.search(path) and (
         (bool(product) and name_on_page)
-        or looks_like_product_url(page_url)
+        or (looks_like_product_url(page_url) and bool(parser.heading))
         or concrete_catalog_leaf
+        or (parser.product_heading and bool(parser.images) and bool(parser.heading))
     )
     if not is_product:
         return {"is_product_page": False, "page_verified": True}
@@ -293,7 +367,7 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
         or _best_page_image(parser.images, page_url, name or page_title)
     )
     stock_quantity, stock_unit = _stock_quantity(offer, description, properties)
-    seller_name, seller_phones = _seller_details(offer, markup)
+    seller_name, seller_phones = _seller_details(offer, markup, page_url)
     evidence = "\n".join(filter(None, [name, description, *[f"{k}: {v}" for k, v in properties.items()]]))[:6500]
     return {
         "is_product_page": True,

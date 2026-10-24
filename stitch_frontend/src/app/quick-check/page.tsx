@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type DragEvent, type FormEvent } from 'rea
 import Link from 'next/link';
 import { AppShell } from '@/components/AppShell';
 import { ProductDiscoveryCards, isVerifiedProductLead, type DiscoveryLead } from '@/components/ProductDiscoveryCards';
+import { productDiscoveryCsv, reportItemHasProductCards, visibleProductLeads } from '@/lib/productDiscovery';
 import { api, errorMessage } from '@/lib/api';
 import { assessStock, displayUnit } from '@/lib/productStock';
 
@@ -57,36 +58,8 @@ function formatDate(value?: string | null) {
   return Number.isNaN(date.getTime()) ? '' : new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', timeStyle: 'short' }).format(date);
 }
 
-function csvCell(value: unknown) {
-  const text = String(value ?? '');
-  // Keep product names and source text from becoming formulas in spreadsheet apps.
-  const safe = /^[\s]*[=+\-@]/.test(text) ? `'${text}` : text;
-  return `"${safe.replaceAll('"', '""')}"`;
-}
-
 function downloadReport(report: ParsedPdf, items: CheckItem[]) {
-  const rows: unknown[][] = [[
-    'Проверка', 'Дата проверки', 'Позиция', 'Товар по ТЗ', 'Требуемое количество', 'Единица',
-    'Найденный товар', 'Продавец', 'Телефон продавца', 'Статус соответствия', 'Характеристика', 'Статус характеристики',
-    'Доказательство со страницы', 'Источник', 'Опубликованный остаток', 'Единица остатка',
-  ]];
-  items.forEach((item, index) => {
-    const leads = item.results.filter(isVerifiedProductLead).slice(0, 8);
-    if (!leads.length) {
-      rows.push([report.filename, item.checked_at, index + 1, item.product_name, item.quantity, item.unit,
-        '', '', '', 'Товар не подтверждён', '', '', '', '', '', '']);
-    }
-    leads.forEach((lead) => {
-      const checks = lead.checks?.length ? lead.checks : [null];
-      checks.forEach((check) => rows.push([
-        report.filename, item.checked_at, index + 1, item.product_name, item.quantity, item.unit,
-        lead.title, lead.seller_name || lead.shop, lead.seller_phones?.join(' / ') || lead.seller_phone,
-        lead.match_status, check?.requirement, check?.status,
-        check?.evidence, lead.url, lead.stock_quantity, lead.stock_unit,
-      ]));
-    });
-  });
-  const blob = new Blob([`\uFEFF${rows.map((row) => row.map(csvCell).join(';')).join('\r\n')}`], { type: 'text/csv;charset=utf-8' });
+  const blob = new Blob([productDiscoveryCsv(report.filename, items)], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
@@ -137,6 +110,7 @@ export default function QuickCheckPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const resultsRef = useRef<HTMLElement>(null);
   const [file, setFile] = useState<File | null>(null);
+  const [reparseDocument, setReparseDocument] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [phase, setPhase] = useState<'idle' | 'parsing' | 'searching' | 'done'>('idle');
   const [parsed, setParsed] = useState<ParsedPdf | null>(null);
@@ -166,12 +140,12 @@ export default function QuickCheckPage() {
   const staleSearch = activeSearch && Number.isFinite(lastProgress) && Math.max(lastPollAt, lastProgress) - lastProgress > 10 * 60 * 1000;
   const failed = items.filter((item) => item.state === 'error').length;
   const progress = items.length ? Math.round(((completed + failed) / items.length) * 100) : 0;
-  const matchedItems = items.filter((item) => item.results.some(isVerifiedProductLead)).length;
-  const withoutCards = items.filter((item) => item.state === 'ready' && !item.results.some(isVerifiedProductLead)).length;
+  const matchedItems = items.filter(reportItemHasProductCards).length;
+  const withoutCards = items.filter((item) => item.state === 'ready' && !reportItemHasProductCards(item)).length;
   const filteredHistory = history.filter((report) => report.filename.toLocaleLowerCase('ru-RU').includes(historyQuery.trim().toLocaleLowerCase('ru-RU')));
   const visibleItems = items.map((item, index) => ({ item, index })).filter(({ item }) => {
-    if (resultFilter === 'with-cards') return item.results.some(isVerifiedProductLead);
-    if (resultFilter === 'without-cards') return item.state === 'ready' && !item.results.some(isVerifiedProductLead);
+    if (resultFilter === 'with-cards') return reportItemHasProductCards(item);
+    if (resultFilter === 'without-cards') return item.state === 'ready' && !reportItemHasProductCards(item);
     if (resultFilter === 'error') return item.state === 'error';
     return true;
   });
@@ -294,6 +268,7 @@ export default function QuickCheckPage() {
 
   function chooseFile(next: File | null) {
     if (!next || busy) return;
+    setReparseDocument(false);
     const validationError = validateDocument(next);
     if (validationError) {
       setError(validationError);
@@ -308,6 +283,7 @@ export default function QuickCheckPage() {
   function clearFile() {
     if (busy) return;
     setFile(null);
+    setReparseDocument(false);
     setError('');
     if (inputRef.current) inputRef.current.value = '';
   }
@@ -415,7 +391,7 @@ export default function QuickCheckPage() {
     try {
       const form = new FormData();
       form.append('file', file);
-      const document: ParsedPdf = await api.post('/quick-check/parse', form);
+      const document: ParsedPdf = await api.post(`/quick-check/parse${reparseDocument ? '?reparse=true' : ''}`, form);
       setParsed(document);
       setReusedReport(Boolean(document.reused));
       setItems(document.items.map((item) => ({ ...item, results: item.results ?? [] })));
@@ -430,14 +406,15 @@ export default function QuickCheckPage() {
   }
 
   const summary = items.reduce((total, item) => {
-    const relevant = item.results.filter(isVerifiedProductLead).slice(0, 8);
+    const relevant = item.state === 'ready' ? visibleProductLeads(item.results) : [];
     for (const lead of relevant) {
       total.cards += 1;
+      if (isVerifiedProductLead(lead)) total.confirmedTypes += 1;
       const assessment = assessStock(item.quantity, item.unit, lead.stock_quantity, lead.stock_unit, lead.availability);
       total[assessment.verdict] += 1;
     }
     return total;
-  }, { cards: 0, enough: 0, shortage: 0, unknown: 0 });
+  }, { cards: 0, confirmedTypes: 0, enough: 0, shortage: 0, unknown: 0 });
 
   return (
     <AppShell>
@@ -478,6 +455,13 @@ export default function QuickCheckPage() {
                   {file && <button type="button" disabled={busy} onClick={clearFile} aria-label={`Убрать файл ${file.name}`} className="flex size-10 items-center justify-center rounded-lg text-on-surface-variant transition-colors hover:bg-error-container hover:text-on-error-container disabled:opacity-50"><span aria-hidden="true" className="material-symbols-outlined text-[20px]">close</span></button>}
                 </div>
               </div>
+              {file && <div className="mt-4 rounded-lg border border-outline-variant bg-surface-container-low/50 p-3">
+                <label className={`flex items-start gap-2.5 text-body-sm text-on-surface ${busy ? 'opacity-60' : 'cursor-pointer'}`}>
+                  <input type="checkbox" checked={reparseDocument} disabled={busy} onChange={(event) => setReparseDocument(event.target.checked)} aria-describedby="quick-check-reparse-help" className="mt-0.5 size-4 shrink-0 accent-primary" />
+                  <span className="font-medium">Прочитать документ заново</span>
+                </label>
+                <p id="quick-check-reparse-help" className="mt-1.5 pl-[26px] text-label-sm leading-relaxed text-on-surface-variant">Создаст новую проверку и заново выделит позиции. Старая проверка останется в истории.</p>
+              </div>}
               {error && <div role="alert" className="mt-4 flex items-start gap-2.5 rounded-lg bg-error-container px-4 py-3 text-body-sm text-on-error-container"><span aria-hidden="true" className="material-symbols-outlined mt-0.5 text-[18px]">error</span><p>{error}</p></div>}
               <div className="mt-5 flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <p className="flex max-w-sm items-start gap-2 text-label-sm text-on-surface-variant"><span aria-hidden="true" className="material-symbols-outlined text-[16px]">lock</span>Исходный файл не хранится. Результат доступен только вам.</p>
@@ -543,7 +527,7 @@ export default function QuickCheckPage() {
                 </div>
               ))}
             </div>
-            <p className="flex items-start gap-2 text-label-sm text-on-surface-variant"><span aria-hidden="true" className="material-symbols-outlined text-[16px]">info</span>Остаток учитываем только по опубликованному количеству. Соответствие ТЗ оценивается отдельно — проверьте доказательства перед закупкой.</p>
+            <p className="flex items-start gap-2 text-label-sm text-on-surface-variant"><span aria-hidden="true" className="material-symbols-outlined text-[16px]">info</span>Среди {summary.cards} найденных карточек тип товара подтверждён у {summary.confirmedTypes}. Остальные карточки — кандидаты для проверки. Соответствие всем требованиям ТЗ и достаточность остатка оцениваются отдельно.</p>
             <div className="flex flex-wrap items-center gap-2 border-b border-outline-variant pb-4" aria-label="Фильтр позиций">
               {([
                 { id: 'all', label: 'Все позиции', count: items.length },

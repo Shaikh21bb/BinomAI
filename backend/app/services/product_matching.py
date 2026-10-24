@@ -9,6 +9,7 @@ import httpx
 import structlog
 
 from app.core.config import settings
+from app.services.product_identity import contains_model, model_identifiers
 
 logger = structlog.get_logger(__name__)
 
@@ -16,6 +17,12 @@ _NUMBER_UNIT = re.compile(r"(?<!\w)(\d+(?:[,.]\d+)?)\s*(мл|ml|литр(?:а|о
 _LOGISTICS = ("место поставки", "срок поставки", "адрес поставки", "условия поставки")
 _GENERIC = {"средство", "моющее", "товар", "для", "жидкое", "изделие", "шт", "объем", "объём"}
 _NUMBER_CONTEXT_STOP = _GENERIC | {"менее", "более", "больше", "состав", "минимум", "максимум"}
+_ACCESSORY = re.compile(
+    r"\b(?:фильтр\w*|комплект\w*|набор\w*|меш(?:ок|к)\w*|шланг\w*|щ[её]тк\w*|насадк\w*|"
+    r"запчаст\w*|держател\w*|подставк\w*|кронштейн\w*|пульт\w*|чех(?:ол|л)\w*|"
+    r"картридж\w*|тонер\w*|адаптер\w*|кабел\w*|filter|accessor\w*|replacement\w*)\b",
+    re.I,
+)
 
 
 def _norm(text: str) -> str:
@@ -124,8 +131,37 @@ def _compare_locally(requirement: str, evidence: str) -> dict[str, str]:
 
 
 def _type_check(requirement: str, evidence: str) -> dict[str, str]:
+    title = evidence.splitlines()[0] if evidence else ""
+    required_words = [word for word in _norm(requirement).split() if len(word) >= 4 and word not in _GENERIC]
+    accessory = _ACCESSORY.search(title)
+    requested_accessory = _ACCESSORY.search(requirement)
+    main_word = required_words[0] if required_words else ""
+    required_main_position = requirement.casefold().find(main_word[:5]) if main_word else -1
+    title_main_position = title.casefold().find(main_word[:5]) if main_word else -1
+    asks_for_accessory = requested_accessory and (
+        required_main_position < 0 or requested_accessory.start() <= required_main_position
+    )
+    if accessory and not asks_for_accessory and (
+        (title_main_position >= 0 and accessory.start() < title_main_position)
+        or (model_identifiers(requirement) and re.search(r"\bдля\b|\bfor\b", title[accessory.end():], re.I))
+    ):
+        # A filter or spare-parts kit may list the exact compatible model;
+        # compatibility does not make it the requested appliance.
+        return {"status": "mismatch", "evidence": title[:220]}
+    for model in model_identifiers(requirement):
+        prefix = re.match(r"[a-z]+", model, re.I).group(0).casefold()
+        conflicting = [candidate for candidate in model_identifiers(title) if candidate.casefold().startswith(prefix)]
+        if conflicting and not contains_model(title, model):
+            return {"status": "mismatch", "evidence": title[:220]}
+        if not contains_model(evidence, model):
+            return {"status": "unknown", "evidence": ""}
     text = _norm(evidence)
-    words = [word for word in _norm(requirement).split() if len(word) >= 4 and word not in _GENERIC]
+    type_text = requirement
+    for model in model_identifiers(requirement):
+        type_text = type_text.replace(model, " ")
+    words = [word for word in _norm(type_text).split() if len(word) >= 4 and word not in _GENERIC]
+    if not words and model_identifiers(requirement):
+        return {"status": "matched", "evidence": (evidence.splitlines()[0] if evidence else "")[:220]}
     if not words:
         return {"status": "unknown", "evidence": ""}
     if "туалета" in words:

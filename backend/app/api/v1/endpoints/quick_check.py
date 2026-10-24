@@ -253,6 +253,7 @@ async def delete_quick_report(
 @router.post("/parse")
 async def parse_quick_document(
     file: UploadFile = File(...),
+    reparse: bool = Query(False, description="Повторно извлечь позиции и создать новую проверку, сохранив предыдущую."),
     user: User = Depends(get_current_user),
     cache: redis.Redis = Depends(get_redis),
     db: AsyncSession = Depends(get_db),
@@ -294,18 +295,19 @@ async def parse_quick_document(
         raise HTTPException(status_code=415, detail="Файл не является корректным DOCX.")
 
     pdf_sha256 = hashlib.sha256(contents).hexdigest()
-    existing = (await db.execute(
-        select(QuickCheckReport)
-        .where(
-            QuickCheckReport.company_id == user.company_id,
-            QuickCheckReport.created_by == user.id,
-            QuickCheckReport.pdf_sha256 == pdf_sha256,
-        )
-        .order_by(QuickCheckReport.created_at.desc(), QuickCheckReport.id.desc())
-        .limit(1)
-    )).scalars().first()
-    if existing is not None:
-        return {**_report_payload(existing), "reused": True}
+    if not reparse:
+        existing = (await db.execute(
+            select(QuickCheckReport)
+            .where(
+                QuickCheckReport.company_id == user.company_id,
+                QuickCheckReport.created_by == user.id,
+                QuickCheckReport.pdf_sha256 == pdf_sha256,
+            )
+            .order_by(QuickCheckReport.created_at.desc(), QuickCheckReport.id.desc())
+            .limit(1)
+        )).scalars().first()
+        if existing is not None:
+            return {**_report_payload(existing), "reused": True}
 
     if extension == "pdf":
         pages = await run_in_threadpool(DocumentParser.get_page_count, contents, "application/pdf")

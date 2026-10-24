@@ -3,6 +3,7 @@
 import io
 import hashlib
 import uuid
+from pathlib import Path
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -18,15 +19,19 @@ from app.main import app
 from tests.conftest import scalar_first
 
 
-def _docx_bytes() -> bytes:
+def _docx_bytes(three_columns: bool = False) -> bytes:
     stream = io.BytesIO()
     document = Document()
     document.add_paragraph("Техническая спецификация")
-    table = document.add_table(rows=2, cols=2)
-    table.cell(0, 0).text = "Товар"
+    table = document.add_table(rows=2, cols=3 if three_columns else 2)
+    table.cell(0, 0).text = "Наименование товара"
     table.cell(0, 1).text = "Количество"
-    table.cell(1, 0).text = "Средство для посуды 500 мл"
-    table.cell(1, 1).text = "12 шт"
+    table.cell(1, 0).text = "Пылесос Philips FC9734/01" if three_columns else "Средство для посуды 500 мл"
+    table.cell(1, 1).text = "20" if three_columns else "12 шт"
+    if three_columns:
+        table.cell(0, 2).text = "Единица измерения"
+        table.cell(1, 2).text = "шт"
+        document.add_paragraph("Требуемые характеристики: мощность 2100 Вт, объём пылесборника 2 л. Цены, остатки и контакты должны быть проверены по открытым страницам магазинов.")
     document.save(stream)
     return stream.getvalue()
 
@@ -76,15 +81,9 @@ async def test_quick_parse_extracts_items_without_tender(authenticated_user, mon
 
 
 @pytest.mark.asyncio
-async def test_quick_parse_extracts_items_from_real_docx(authenticated_user, monkeypatch):
-    contents = _docx_bytes()
-    extracted = []
-
-    def extract_products(text):
-        extracted.append(text)
-        return [{"product_name": "Средство для посуды 500 мл", "quantity": 12, "unit": "шт"}]
-
-    monkeypatch.setattr(quick_check, "extract_products_from_text", extract_products)
+@pytest.mark.parametrize("three_columns", [False, True])
+async def test_quick_parse_extracts_items_from_real_docx(authenticated_user, three_columns):
+    contents = _docx_bytes(three_columns)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             "/api/v1/quick-check/parse",
@@ -99,10 +98,32 @@ async def test_quick_parse_extracts_items_from_real_docx(authenticated_user, mon
     assert response.json()["filename"] == "techspec.docx"
     assert response.json()["page_count"] == 1
     assert response.json()["ocr_pages"] == 0
-    assert "Средство для посуды 500 мл" in extracted[0]
-    assert "12 шт" in extracted[0]
+    assert response.json()["items"][0]["product_name"] == ("Пылесос Philips FC9734/01" if three_columns else "Средство для посуды 500 мл")
+    assert response.json()["items"][0]["quantity"] == (20 if three_columns else 12)
+    assert response.json()["items"][0]["unit"] == "шт"
+    if three_columns:
+        assert response.json()["items"][0]["specs"] == "мощность 2100 Вт, объём пылесборника 2 л."
     saved = authenticated_user[1].add.call_args.args[0]
     assert saved.pdf_sha256 == hashlib.sha256(contents).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_quick_parse_handles_goszakup_pdf_label_layout(authenticated_user, monkeypatch):
+    raw_text = (Path(__file__).parents[1] / "fixtures" / "goszakup_lot_spec.txt").read_text()
+    monkeypatch.setattr(quick_check.DocumentParser, "get_page_count", lambda *_: 2)
+    monkeypatch.setattr(quick_check, "extract_pdf_text_with_ocr", lambda *_: (raw_text, 0))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/quick-check/parse",
+            files={"file": ("goszakup-layout.pdf", b"%PDF-layout-fixture", "application/pdf")},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["total_items"] == 1
+    assert response.json()["items"][0]["product_name"] == "Жакет женский на замке из плотной вязки"
+    assert response.json()["items"][0]["quantity"] == 20
+    assert response.json()["items"][0]["state"] == "pending"
+    assert response.json()["processing_state"] == "queued"
 
 
 @pytest.mark.asyncio
@@ -164,6 +185,51 @@ async def test_reupload_same_pdf_opens_saved_report_without_ocr_or_search(authen
     assert user.company_id in params
     assert user.id in params
     assert existing.pdf_sha256 in params
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extension", ["pdf", "docx"])
+async def test_forced_reparse_creates_fresh_items_and_preserves_existing_report(authenticated_user, monkeypatch, extension):
+    user, db = authenticated_user
+    contents = _docx_bytes(three_columns=True) if extension == "docx" else b"%PDF-same-document"
+    original_items = [{"product_name": "Старое извлечение", "specs": None, "state": "ready", "results": [{"title": "Старый результат"}]}]
+    existing = QuickCheckReport(
+        id=uuid.uuid4(), company_id=user.company_id, created_by=user.id,
+        filename=f"original.{extension}", page_count=1, ocr_pages=0, total_items=1,
+        truncated=False, processing_state="completed", pdf_sha256=hashlib.sha256(contents).hexdigest(),
+        items=original_items,
+    )
+    db.execute.return_value = scalar_first(existing)
+    published = MagicMock()
+    monkeypatch.setattr(quick_check.search_quick_report_task, "delay", published)
+    if extension == "pdf":
+        monkeypatch.setattr(quick_check.DocumentParser, "get_page_count", lambda *_: 1)
+        monkeypatch.setattr(quick_check, "extract_pdf_text_with_ocr", lambda *_: ("Пылесос Philips FC9734/01 | 20 | шт\n\nТребуемые характеристики: мощность 2100 Вт, объём пылесборника 2 л.", 0))
+    mime = "application/pdf" if extension == "pdf" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/quick-check/parse?reparse=true",
+            files={"file": (f"original.{extension}", contents, mime)},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["id"] != str(existing.id)
+    assert not response.json().get("reused", False)
+    assert response.json()["items"][0]["product_name"] == "Пылесос Philips FC9734/01"
+    assert response.json()["items"][0]["specs"] == "мощность 2100 Вт, объём пылесборника 2 л."
+    assert response.json()["items"][0]["quantity"] == 20
+    assert response.json()["items"][0]["state"] == "pending"
+    assert response.json()["processing_state"] == "queued"
+    saved = db.add.call_args.args[0]
+    assert saved.pdf_sha256 == existing.pdf_sha256
+    assert saved.id != existing.id
+    assert saved.company_id == user.company_id
+    assert saved.created_by == user.id
+    assert existing.items == original_items
+    assert existing.processing_state == "completed"
+    db.execute.assert_not_awaited()
+    db.delete.assert_not_awaited()
+    published.assert_called_once()
 
 
 @pytest.mark.asyncio
