@@ -13,6 +13,7 @@ from app.db.models.quick_check_report import QuickCheckReport
 from app.db.session import async_task_session_factory
 from app.services.market_search import search_products
 from app.services.product_matching import evaluate_product_leads
+from app.services.product_readiness import annotate_order_readiness
 from app.tasks.product_search_tasks import _build_search_query
 
 logger = structlog.get_logger(__name__)
@@ -109,6 +110,7 @@ async def run_quick_check_async(report_id_str: str, run_id_str: str) -> dict:
             return {"status": "stale"}
         count = len(report.items)
         closure_policies = [item.get("closure_policy") for item in report.items]
+        order_quantities = [(item.get("quantity"), item.get("unit")) for item in report.items]
 
     for index in range(count):
         claim = await _claim_item(report_id, run_id, index)
@@ -116,10 +118,13 @@ async def run_quick_check_async(report_id_str: str, run_id_str: str) -> dict:
             continue
         name, specs = claim
         policy = closure_policies[index]
+        quantity, unit = order_quantities[index]
         matching_options = {"closure_policy": policy} if policy in {"zipper_only", "allow_alternatives"} else {}
         try:
-            results = await search_products(_build_search_query(name, specs), specs=specs, **matching_options)
-            checked = jsonable_encoder((await evaluate_product_leads(name, specs, results, **matching_options))[:16])
+            results = await search_products(_build_search_query(name, specs), specs=specs, quantity=quantity, unit=unit, **matching_options)
+            checked = jsonable_encoder(annotate_order_readiness(
+                (await evaluate_product_leads(name, specs, results, **matching_options))[:16], quantity, unit,
+            ))
         except Exception as exc:
             logger.warning("quick_check_item_failed", report_id=str(report_id), index=index, error_type=type(exc).__name__)
             await _finish_item(report_id, run_id, index, error=True)

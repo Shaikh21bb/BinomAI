@@ -15,6 +15,7 @@ from app.core.supabase import supabase_admin
 from app.services.product_extraction import extract_products_from_text
 from app.services.market_search import search_products, enrich_product_pages
 from app.services.product_matching import evaluate_product_leads
+from app.services.product_readiness import annotate_order_readiness
 from app.services.sourcing import normalize_name, normalize_unit
 
 logger = structlog.get_logger(__name__)
@@ -153,7 +154,7 @@ async def run_product_search_async(task, project_id_str: str) -> dict:
         for ps in stored:
             try:
                 query = _build_search_query(ps.product_name, ps.specs)
-                results = await search_products(query, region, specs=ps.specs)
+                results = await search_products(query, region, specs=ps.specs, quantity=ps.quantity, unit=ps.unit)
                 # A search engine can return only category links on a repeat
                 # run. Recheck previously discovered product URLs before
                 # replacing useful cards with a weaker search result.
@@ -166,7 +167,9 @@ async def run_product_search_async(task, project_id_str: str) -> dict:
                     refreshed = await enrich_product_pages(previous)
                     known_urls = {row.get("url") for row in results}
                     results = [row for row in refreshed if row.get("is_product_page") and row.get("url") not in known_urls] + results
-                results = await evaluate_product_leads(ps.product_name, ps.specs, results)
+                results = annotate_order_readiness(
+                    await evaluate_product_leads(ps.product_name, ps.specs, results), ps.quantity, ps.unit,
+                )
                 ps.results = results
                 ps.status = "ready"
                 ps.best_match = _pick_discovery_lead(results)
@@ -182,7 +185,7 @@ async def run_product_search_async(task, project_id_str: str) -> dict:
 
 def _pick_discovery_lead(results: List[dict]) -> Optional[dict]:
     """A best match exists only when every characteristic has source evidence."""
-    return next((row for row in results if row.get("match_status") == "matched"), None)
+    return next((row for row in results if (row.get("order_readiness") or {}).get("status") == "ready"), None)
 
 
 @shared_task(bind=True, max_retries=1, default_retry_delay=60)

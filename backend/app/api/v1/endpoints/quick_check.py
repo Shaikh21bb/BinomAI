@@ -31,6 +31,7 @@ from app.db.models.user import User
 from app.services.market_search import search_products
 from app.services.product_extraction import extract_products_from_text
 from app.services.product_matching import evaluate_product_leads
+from app.services.product_readiness import annotate_order_readiness
 from app.tasks.product_search_tasks import _build_search_query
 from app.tasks.quick_check_tasks import search_quick_report_task
 
@@ -49,6 +50,8 @@ class QuickSearchRequest(BaseModel):
     report_id: uuid.UUID | None = None
     item_index: int | None = Field(default=None, ge=0, lt=_MAX_ITEMS)
     closure_policy: Literal["source", "zipper_only", "allow_alternatives"] | None = None
+    quantity: float | None = Field(default=None, gt=0, le=1_000_000_000, allow_inf_nan=False)
+    unit: str | None = Field(default=None, max_length=50)
 
 
 def _report_payload(report: QuickCheckReport) -> dict:
@@ -386,7 +389,7 @@ async def search_quick_product(
         raise HTTPException(status_code=422, detail="Укажите номер сохранённой проверки и позиции вместе.")
     if body.closure_policy is not None and body.report_id is None:
         raise HTTPException(status_code=422, detail="Уточнение применяется только к позиции сохранённой проверки.")
-    name, specs = body.product_name, body.specs
+    name, specs, quantity, unit = body.product_name, body.specs, body.quantity, body.unit
     closure_policy = body.closure_policy
     started_policy = None
     started_run_id = None
@@ -399,7 +402,7 @@ async def search_quick_product(
         item = report.items[body.item_index]
         if item.get("product_name") != body.product_name:
             raise HTTPException(status_code=409, detail="Позиция изменилась. Откройте сохранённую проверку снова.")
-        name, specs = item["product_name"], item.get("specs")
+        name, specs, quantity, unit = item["product_name"], item.get("specs"), item.get("quantity"), item.get("unit")
         started_policy = _saved_closure_policy(item)
         started_run_id = report.run_id
         if closure_policy is None:
@@ -410,8 +413,10 @@ async def search_quick_product(
     await db.commit()
     query = _build_search_query(name, specs)
     matching_options = {"closure_policy": closure_policy} if closure_policy in {"zipper_only", "allow_alternatives"} else {}
-    results = await search_products(query, specs=specs, **matching_options)
-    checked = jsonable_encoder((await evaluate_product_leads(name, specs, results, **matching_options))[:16])
+    results = await search_products(query, specs=specs, quantity=quantity, unit=unit, **matching_options)
+    checked = jsonable_encoder(annotate_order_readiness(
+        (await evaluate_product_leads(name, specs, results, **matching_options))[:16], quantity, unit,
+    ))
     checked_at = datetime.now(timezone.utc).isoformat()
 
     if body.report_id is not None and body.item_index is not None:
@@ -421,7 +426,7 @@ async def search_quick_product(
         if body.item_index >= len(report.items):
             raise HTTPException(status_code=409, detail="Позиция изменилась. Откройте сохранённый отчёт снова.")
         current = report.items[body.item_index]
-        if (current.get("product_name"), current.get("specs"), _saved_closure_policy(current)) != (name, specs, started_policy):
+        if (current.get("product_name"), current.get("specs"), current.get("quantity"), current.get("unit"), _saved_closure_policy(current)) != (name, specs, quantity, unit, started_policy):
             raise HTTPException(status_code=409, detail="ТЗ или уточнение изменилось во время поиска. Откройте сохранённый отчёт снова.")
         updated = list(report.items)
         updated[body.item_index] = {

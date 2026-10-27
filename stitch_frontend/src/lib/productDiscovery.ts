@@ -1,3 +1,5 @@
+import { assessStock, compatibleUnits, type StockAssessment } from './productStock';
+
 export interface DiscoveryCheck {
   id?: string;
   requirement: string;
@@ -25,6 +27,28 @@ export interface DiscoveryLead {
   page_verified?: boolean;
   match_status?: 'matched' | 'partial' | 'mismatch' | 'unknown' | 'unverified';
   checks?: DiscoveryCheck[];
+  min_order_quantity?: number | null;
+  min_order_unit?: string | null;
+  price_quantity?: number | null;
+  price_unit?: string | null;
+  price_basis_status?: 'published' | 'unknown' | string | null;
+  wholesale_terms?: string | null;
+  variant_status?: 'single' | 'selected' | 'ambiguous' | 'unknown' | string | null;
+  certificate_status?: 'missing' | 'claim_only' | 'document_linked' | null;
+  certificate_documents?: { url: string; label?: string; status: 'unverified' }[];
+  order_readiness?: {
+    status: 'ready' | 'needs_confirmation' | 'not_suitable';
+    gaps: { code: string; label: string }[];
+    quantity: {
+      status: 'enough' | 'shortage' | 'unknown';
+      requested_quantity: number | null;
+      requested_unit: string | null;
+      stock_quantity: number | null;
+      stock_unit: string | null;
+      reason: string;
+      missing?: number;
+    };
+  };
 }
 
 export interface DiscoveryReportItem {
@@ -88,16 +112,14 @@ export function productVerificationScope(lead: DiscoveryLead) {
   const onlyType = checks.length > 0 && technicalChecks.length === 0;
   return {
     technicalCount: technicalChecks.length,
-    confirmedTechnicalCount: technicalChecks.filter((check) => check.status === 'matched').length,
+    confirmedTechnicalCount: technicalChecks.filter((check) => effectiveProductCheckStatus(check) === 'matched').length,
     label: onlyType && isVerifiedProductLead(lead) ? 'Совпадает тип товара' : null,
     explanation: onlyType ? 'Технические требования не выделены; проверьте ТЗ вручную.' : null,
   };
 }
 
-export function canRecommendProductLead(lead: DiscoveryLead) {
-  return isVerifiedProductLead(lead)
-    && productVerificationScope(lead).confirmedTechnicalCount > 0
-    && ['matched', 'partial'].includes(lead.match_status ?? '');
+export function canRecommendProductLead(lead: DiscoveryLead, quantity?: number | string | null, unit?: string | null) {
+  return isConfirmedProductOffer(lead, quantity, unit);
 }
 
 const imageNoise = /favicon|logo|sprite|placeholder|\/watch\/|portal-portable|base_satu|pixel/i;
@@ -124,11 +146,41 @@ export function isCompleteProductLead(lead: DiscoveryLead) {
 export function hasConfirmedProductRequirements(lead: DiscoveryLead) {
   return isVerifiedProductLead(lead) && lead.match_status === 'matched'
     && productVerificationScope(lead).technicalCount > 0
-    && Boolean(lead.checks?.every((check) => check.status === 'matched'));
+    && Boolean(lead.checks?.every((check) => effectiveProductCheckStatus(check) === 'matched'));
 }
 
-/** Published offer evidence only: exact order quantity remains a separate check. */
-export function isConfirmedProductOffer(lead: DiscoveryLead) {
+/** A linked certificate or a seller's certificate claim is not independent validation. */
+export function isCertificateRequirement(check: DiscoveryCheck) {
+  return /certificat|certificate|declarat|document/i.test(check.id ?? '')
+    || /ГОСТ|\bСТ\s*РК\b|сертификат|декларац\S*\s+соответств|регистрационн\S*\s+удостоверен|certificate|declaration\s+of\s+conformity/i.test(check.requirement ?? '');
+}
+
+export function effectiveProductCheckStatus(check: DiscoveryCheck): DiscoveryCheck['status'] {
+  return isCertificateRequirement(check) && check.status === 'matched' ? 'unknown' : check.status;
+}
+
+/** No legacy/local inference can substitute for the server's quantity-bound readiness. */
+export function orderQuantityAssessment(lead: DiscoveryLead, quantity?: number | string | null, unit?: string | null): StockAssessment {
+  const amount = Number(quantity);
+  const binding = lead.order_readiness?.quantity;
+  if (quantity == null || !Number.isFinite(amount) || amount <= 0 || !binding || binding.requested_quantity !== amount || !compatibleUnits(unit, binding.requested_unit)) return { verdict: 'unknown' };
+  const raw = assessStock(amount, unit, lead.page_verified ? lead.stock_quantity : null, lead.stock_unit, lead.availability);
+  const canonical = assessStock(amount, unit, binding.stock_quantity, binding.stock_unit, lead.availability);
+  if (binding.status === 'enough' && raw.verdict === 'enough' && canonical.verdict === 'enough') return { verdict: 'enough' };
+  if (binding.status === 'shortage' && raw.verdict === 'shortage' && canonical.verdict === 'shortage') return canonical;
+  return { verdict: 'unknown' };
+}
+
+export function isConfirmedProductOffer(lead: DiscoveryLead, quantity?: number | string | null, unit?: string | null) {
+  const amount = Number(quantity);
+  const readiness = lead.order_readiness;
+  if (quantity == null || !Number.isFinite(amount) || amount <= 0 || readiness?.status !== 'ready' || !Array.isArray(readiness.gaps) || readiness.gaps.length) return false;
+  const binding = readiness.quantity;
+  if (!binding || binding.status !== 'enough' || binding.requested_quantity !== amount || !compatibleUnits(unit, binding.requested_unit)) return false;
+  if (orderQuantityAssessment(lead, amount, unit).verdict !== 'enough') return false;
+  if (lead.min_order_quantity == null || !Number.isFinite(lead.min_order_quantity) || lead.min_order_quantity <= 0 || lead.min_order_quantity > amount || !compatibleUnits(unit, lead.min_order_unit)) return false;
+  if (!['single', 'selected'].includes(lead.variant_status ?? '') || !lead.wholesale_terms?.trim()) return false;
+  if (lead.price_basis_status !== 'published' || lead.price_quantity == null || !Number.isFinite(lead.price_quantity) || lead.price_quantity <= 0 || lead.price_quantity > amount || !compatibleUnits(unit, lead.price_unit)) return false;
   return hasConfirmedProductRequirements(lead) && isMatchingInStockLead(lead) && isCompleteProductLead(lead);
 }
 
@@ -139,7 +191,7 @@ export interface ProductConfirmationGap {
 }
 
 /** Explain the existing strict predicate without turning missing evidence into a match. */
-export function productConfirmationGaps(lead: DiscoveryLead): ProductConfirmationGap[] {
+export function productConfirmationGaps(lead: DiscoveryLead, quantity?: number | string | null, unit?: string | null): ProductConfirmationGap[] {
   const gaps: ProductConfirmationGap[] = [];
   const scope = productVerificationScope(lead);
   const checks = lead.checks ?? [];
@@ -147,8 +199,8 @@ export function productConfirmationGaps(lead: DiscoveryLead): ProductConfirmatio
   if (!isVerifiedProductLead(lead)) gaps.push({ code: 'type', label: 'Тип товара не подтверждён.' });
   if (!checks.length) gaps.push({ code: 'requirements-unchecked', label: 'Проверка технических требований по странице не выполнена.' });
   else if (!scope.technicalCount) gaps.push({ code: 'requirements-missing', label: 'Технические требования не выделены — сверьте исходное ТЗ.' });
-  const mismatches = checks.filter((check) => check.status === 'mismatch').map((check) => check.requirement);
-  const unknown = checks.filter((check) => check.status === 'unknown').map((check) => check.requirement);
+  const mismatches = checks.filter((check) => effectiveProductCheckStatus(check) === 'mismatch').map((check) => check.requirement);
+  const unknown = checks.filter((check) => effectiveProductCheckStatus(check) === 'unknown').map((check) => check.requirement);
   if (mismatches.length) gaps.push({ code: 'requirements-mismatch', label: 'Есть расхождения с выделенными требованиями.', requirements: mismatches });
   if (unknown.length) gaps.push({ code: 'requirements-unknown', label: 'Не все выделенные требования подтверждены.', requirements: unknown });
   if (scope.technicalCount && !mismatches.length && !unknown.length && !hasConfirmedProductRequirements(lead)) gaps.push({ code: 'verification', label: 'Итоговое соответствие требованиям не подтверждено.' });
@@ -164,7 +216,25 @@ export function productConfirmationGaps(lead: DiscoveryLead): ProductConfirmatio
   if (!hasProductPhoto(lead)) gaps.push({ code: 'photo', label: 'Нет опубликованного фото товара с прочитанной страницы.' });
   if (!lead.page_verified || lead.price == null || !Number.isFinite(Number(lead.price)) || Number(lead.price) <= 0 || !lead.currency?.trim()) gaps.push({ code: 'price', label: 'Не подтверждена положительная цена с валютой.' });
   if (!publishedProductPhones(lead).length) gaps.push({ code: 'contact', label: 'Телефон на странице источника не найден.' });
-  return gaps;
+  const amount = Number(quantity);
+  const readiness = lead.order_readiness;
+  if (!readiness) gaps.push({ code: 'readiness-missing', label: 'Готовность к заказу не проверялась. Повторите поиск, чтобы проверить количество и условия поставки.' });
+  else for (const gap of readiness.gaps ?? []) gaps.push({ code: gap.code, label: gap.label });
+  if (quantity == null || !Number.isFinite(amount) || amount <= 0) gaps.push({ code: 'quantity', label: 'В документе не подтверждено корректное количество заказа.' });
+  else {
+    const stock = assessStock(amount, unit, lead.page_verified ? lead.stock_quantity : null, lead.stock_unit, lead.availability);
+    if (stock.verdict !== 'enough') gaps.push({ code: 'quantity', label: stock.verdict === 'shortage' ? 'Опубликованного остатка недостаточно для всего заказа.' : 'Точный остаток и его единица не подтверждают количество по заказу.' });
+    if (readiness && (!readiness.quantity || readiness.quantity.requested_quantity !== amount || !compatibleUnits(unit, readiness.quantity.requested_unit))) gaps.push({ code: 'quantity-binding', label: 'Проверка готовности выполнена для другого количества или единицы. Повторите поиск.' });
+    else if (readiness?.quantity && (readiness.quantity.status !== 'enough' || assessStock(amount, unit, readiness.quantity.stock_quantity, readiness.quantity.stock_unit, lead.availability).verdict !== 'enough')) gaps.push({ code: 'quantity-readiness', label: readiness.quantity.reason || 'Сервер не подтвердил достаточный остаток для этого заказа.' });
+  }
+  if (lead.min_order_quantity == null || !Number.isFinite(lead.min_order_quantity) || lead.min_order_quantity <= 0 || !compatibleUnits(unit, lead.min_order_unit)) gaps.push({ code: 'moq', label: 'Минимальный заказ и его единица не подтверждены.' });
+  else if (Number.isFinite(amount) && lead.min_order_quantity > amount) gaps.push({ code: 'moq', label: 'Минимальный заказ продавца превышает нужное количество.' });
+  if (!['single', 'selected'].includes(lead.variant_status ?? '')) gaps.push({ code: 'variant', label: 'Нужный вариант товара не выбран или не подтверждён.' });
+  if (!lead.wholesale_terms?.trim()) gaps.push({ code: 'wholesale', label: 'Опубликованные условия оптовой поставки не подтверждены.' });
+  if (lead.price_basis_status !== 'published' || lead.price_quantity == null || !Number.isFinite(lead.price_quantity) || lead.price_quantity <= 0 || !compatibleUnits(unit, lead.price_unit)) gaps.push({ code: 'price-basis', label: 'Не подтверждено, за какое количество и единицу указана цена.' });
+  else if (Number.isFinite(amount) && lead.price_quantity > amount) gaps.push({ code: 'price-basis', label: 'Опубликованная цена относится к партии больше вашего заказа.' });
+  if (readiness && readiness.status !== 'ready' && !readiness.gaps?.length) gaps.push({ code: 'readiness', label: 'Поставщик не подтверждён как готовый выполнить этот заказ.' });
+  return [...new Map(gaps.map((gap) => [gap.code, gap])).values()];
 }
 
 export function productQuantityMessage(quantity: number | string | null | undefined, unit: string, verdict: 'enough' | 'shortage' | 'unknown') {
@@ -177,18 +247,18 @@ export function productQuantityMessage(quantity: number | string | null | undefi
 export function reportConfirmationGaps(items: DiscoveryReportItem[]) {
   const unique = new Map<string, ProductConfirmationGap>();
   for (const item of items.filter((row) => row.state === 'ready')) {
-    for (const lead of visibleProductLeads(item.results)) {
-      for (const gap of productConfirmationGaps(lead)) if (!unique.has(gap.code)) unique.set(gap.code, gap);
+    for (const lead of visibleProductLeads(item.results, 'all', item.quantity, item.unit)) {
+      for (const gap of productConfirmationGaps(lead, item.quantity, item.unit)) if (!unique.has(gap.code)) unique.set(gap.code, gap);
     }
   }
   return [...unique.values()];
 }
 
-function matchesProductFilter(lead: DiscoveryLead, filter: ProductLeadFilter) {
+function matchesProductFilter(lead: DiscoveryLead, filter: ProductLeadFilter, quantity?: number | string | null, unit?: string | null) {
   if (filter === 'in-stock') return isMatchingInStockLead(lead);
   if (filter === 'complete') return isCompleteProductLead(lead);
   if (filter === 'requirements') return hasConfirmedProductRequirements(lead);
-  if (filter === 'combined') return isConfirmedProductOffer(lead);
+  if (filter === 'combined') return isConfirmedProductOffer(lead, quantity, unit);
   return true;
 }
 
@@ -210,18 +280,18 @@ export function productLeadScore(lead: DiscoveryLead) {
 }
 
 /** Cards, totals, filters and export all use this same ordered, bounded selection. */
-export function visibleProductLeads(leads: DiscoveryLead[], filter: ProductLeadFilter = 'all') {
+export function visibleProductLeads(leads: DiscoveryLead[], filter: ProductLeadFilter = 'all', quantity?: number | string | null, unit?: string | null) {
   const byUrl = new Map<string, DiscoveryLead>();
   for (const lead of leads.filter(isProductCardLead)) {
     const key = canonicalProductUrl(lead.url)!;
     const previous = byUrl.get(key);
     if (!previous || productLeadScore(lead) > productLeadScore(previous)) byUrl.set(key, lead);
   }
-  return [...byUrl.values()].sort((a, b) => productLeadScore(b) - productLeadScore(a)).slice(0, 8).filter((lead) => matchesProductFilter(lead, filter));
+  return [...byUrl.values()].sort((a, b) => Number(isConfirmedProductOffer(b, quantity, unit)) - Number(isConfirmedProductOffer(a, quantity, unit)) || productLeadScore(b) - productLeadScore(a)).slice(0, 8).filter((lead) => matchesProductFilter(lead, filter, quantity, unit));
 }
 
 export function reportItemHasProductCards(item: DiscoveryReportItem) {
-  return item.state === 'ready' && visibleProductLeads(item.results).length > 0;
+  return item.state === 'ready' && visibleProductLeads(item.results, 'all', item.quantity, item.unit).length > 0;
 }
 
 export function reportItemMatchesFilter(item: DiscoveryReportItem, filter: DiscoveryResultFilter, retrying = false) {
@@ -230,7 +300,7 @@ export function reportItemMatchesFilter(item: DiscoveryReportItem, filter: Disco
   if (item.state !== 'ready') return false;
   if (filter === 'without-cards') return !reportItemHasProductCards(item);
   if (filter === 'with-cards') return reportItemHasProductCards(item);
-  return visibleProductLeads(item.results, filter).length > 0;
+  return visibleProductLeads(item.results, filter, item.quantity, item.unit).length > 0;
 }
 
 export function quickCheckProgressLabel(state: string, retryingIndex: number | null, completed: number, total: number, failed: number) {
@@ -268,13 +338,17 @@ export function productDiscoveryCsv(filename: string, items: DiscoveryReportItem
     'Единица остатка', 'Статус проверки позиции', 'Страница прочитана', 'Тип товара подтверждён',
     'Технических требований выделено', 'Технических требований подтверждено',
     'Уточнение застёжки для выполненного поиска',
+    'Готовность к этому заказу', 'Что требует подтверждения', 'Проверка количества',
+    'Минимальный заказ', 'Единица минимального заказа', 'Цена за количество', 'Единица цены',
+    'Основание цены', 'Условия оптовой поставки', 'Вариант товара', 'Документы — подлинность не проверена',
   ]];
   items.forEach((item, index) => {
-    const leads = item.state === 'ready' ? visibleProductLeads(item.results) : [];
+    const leads = item.state === 'ready' ? visibleProductLeads(item.results, 'all', item.quantity, item.unit) : [];
     if (!leads.length) {
       const status = item.state === 'ready' ? 'Товарные страницы не найдены' : item.state === 'error' ? 'Ошибка поиска' : 'Поиск не завершён';
       rows.push([filename, item.checked_at, index + 1, item.product_name, item.quantity, item.unit,
-        '', '', '', status, '', '', '', '', '', '', item.state, '', '', '', '', CLOSURE_POLICY_LABELS[item.closure_policy ?? 'source']]);
+        '', '', '', status, '', '', '', '', '', '', item.state, '', '', '', '', CLOSURE_POLICY_LABELS[item.closure_policy ?? 'source'],
+        'Не подтверждена', '', 'unknown', '', '', '', '', '', '', '', '']);
     }
     leads.forEach((lead) => {
       const scope = productVerificationScope(lead);
@@ -282,11 +356,16 @@ export function productDiscoveryCsv(filename: string, items: DiscoveryReportItem
       checks.forEach((check) => rows.push([
         filename, item.checked_at, index + 1, item.product_name, item.quantity, item.unit,
         lead.title, lead.seller_name || lead.shop, publishedProductPhones(lead).join(' / '),
-        lead.match_status ?? 'unverified', check?.requirement, check?.status,
+        lead.match_status ?? 'unverified', check?.requirement, check ? effectiveProductCheckStatus(check) : '',
         check?.evidence, lead.url, lead.stock_quantity, lead.stock_unit, item.state,
         lead.page_verified ? 'Да' : 'Нет', isVerifiedProductLead(lead) ? 'Да' : 'Нет',
         scope.technicalCount, scope.confirmedTechnicalCount,
         CLOSURE_POLICY_LABELS[item.closure_policy ?? 'source'],
+        isConfirmedProductOffer(lead, item.quantity, item.unit) ? 'Готово к указанному заказу' : lead.order_readiness?.status === 'not_suitable' ? 'Не подходит' : 'Требует подтверждения',
+        productConfirmationGaps(lead, item.quantity, item.unit).map((gap) => gap.label).join(' | '),
+        orderQuantityAssessment(lead, item.quantity, item.unit).verdict, lead.min_order_quantity, lead.min_order_unit,
+        lead.price_quantity, lead.price_unit, lead.price_basis_status, lead.wholesale_terms, lead.variant_status,
+        lead.certificate_documents?.map((document) => `${document.label || 'Документ'}: ${document.url} (подлинность не проверена)`).join(' | '),
       ]));
     });
   });

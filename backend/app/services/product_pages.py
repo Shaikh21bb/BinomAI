@@ -8,7 +8,7 @@ import math
 import re
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urljoin, urlparse
 
 import httpx
 from app.services.product_identity import contains_model, model_identifiers
@@ -27,7 +27,11 @@ _PRODUCT_PATH = re.compile(
     re.I,
 )
 _GENERIC_TITLE_WORDS = {"средс", "моющ", "товар", "купит", "ценам", "посуд", "коста"}
-_STOCK_TEXT = re.compile(r"(?:в наличии|на складе|остаток)\s*:?\s*(\d{1,6})\s*(шт\.?|штук|ед\.?|единиц|упак\.?|упаковок)\b", re.I)
+_QUANTITY_UNITS = r"(?:упаков(?:ка|ки|ок)|упак\.?|штук(?:а|и)?|шт\.?|единиц\w*|ед\.?|кг|kg|гр|г|g|мл|ml|литр\w*|л|l|м[²³23]|см|мм|м|pcs?|pieces?|meters?)"
+_STOCK_TEXT = re.compile(rf"(?:в наличии|на складе|остаток)\s*:?\s*(\d+(?:[.,]\d+)?)\s*({_QUANTITY_UNITS})(?!\w)", re.I)
+_MOQ_TEXT = re.compile(rf"(?:минимальн\w*\s+(?:заказ|партия)|мин\.?\s*заказ|minimum\s+order|MOQ)\s*[:—-]?\s*(?:от\s+)?(\d+(?:[.,]\d+)?)\s*({_QUANTITY_UNITS})(?!\w)", re.I)
+_CERTIFICATE_TEXT = re.compile(r"сертификат|декларац|\bГОСТ\b|certificate|declaration\s+of\s+conformity", re.I)
+_UNIT_CODES = {"H87": "шт", "PCE": "шт", "C62": "ед.", "KGM": "кг", "GRM": "г", "TNE": "т", "MTR": "м", "CMT": "см", "MMT": "мм", "MTK": "м2", "MTQ": "м3", "LTR": "л", "MLT": "мл"}
 _SATU_PHONE = re.compile(r"PhoneDescription:(\+7\s*\(\d{3}\)\s*\d{3}[-\s]\d{2}[-\s]\d{2})", re.I)
 _PHONE_TEXT = re.compile(r"(?<!\d)(?:\+7|8)\s*\(?\d{3}\)?[\s.-]*\d{3}[\s.-]*\d{2}[\s.-]*\d{2}(?!\d)")
 _MARKETPLACE_HOSTS = {"satu.kz", "kaspi.kz", "ozon.kz", "wildberries.kz", "wildberries.ru"}
@@ -67,14 +71,15 @@ class _CommercialParser(HTMLParser):
         self.stock_labels: list[str] = []
         self.root_availability: str | None = None
         self.sku: str | None = None
+        self.variant_selector = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
         attributes = dict(attrs)
         classes = set((attributes.get("class") or "").casefold().split())
-        context = " ".join(classes)
+        context = " ".join(attributes.get(key) or "" for key in ("class", "id", "data-testid", "data-widget_type"))
         parent = self.stack[-1] if self.stack else {}
-        ignored = parent.get("ignored", False) or tag in {"script", "style", "del"} or bool(re.search(
-            r"related|upsell|cross.sell|recommend|cart.totals|mini.cart|old.price|price.old|installment|monthly|credit", context
+        ignored = parent.get("ignored", False) or tag in {"script", "style", "del", "nav", "header", "footer", "aside"} or bool(re.search(
+            r"related|upsell|cross.sell|recommend|cart.totals|mini.cart|old.price|price.old|installment|monthly|credit", context, re.I,
         )) or (tag == "li" and "type-product" in classes)
         root = attributes.get("data-elementor-type") == "product" or (
             tag != "li" and "type-product" in classes
@@ -92,6 +97,8 @@ class _CommercialParser(HTMLParser):
         eligible = self.heading_seen and (in_main or scope) and not ignored
         kind = None
         if eligible:
+            if "variations_form" in classes or (tag == "select" and re.search(r"attribute_|variant|variation|^(?:size|color|colour)$", attributes.get("name") or "", re.I)):
+                self.variant_selector = True
             if "price" in classes or classes & {"product__price", "product-price", "product_price"} or attributes.get("itemprop") == "price":
                 kind = "price"
             elif classes & {"stock", "availability", "product-availability", "product__availability"}:
@@ -216,26 +223,199 @@ def _best_page_image(images: list[tuple[str, str]], page_url: str, title: str) -
     return max(ranked, default=(0, None), key=lambda row: row[0])[1]
 
 
-def _stock_quantity(offer: dict[str, Any], description: str, properties: dict[str, str]) -> tuple[int | None, str | None]:
-    level = offer.get("inventoryLevel")
-    if level is None:
-        level = offer.get("availableQuantity")
-    unit = "ед."
-    if isinstance(level, dict):
-        unit = _clean(level.get("unitText") or "ед.", 20)
-        level = level.get("value")
-    if level is not None:
-        try:
-            amount = int(str(level).strip())
-            if 0 <= amount <= 1_000_000:
-                return amount, unit
-        except (ValueError, TypeError):
-            pass
-    evidence = "\n".join([description, *[f"{key}: {value}" for key, value in properties.items()]])
-    match = _STOCK_TEXT.search(evidence)
-    if match:
-        return int(match.group(1)), match.group(2)
-    return None, None
+def _quantity_number(value: Any, *, positive: bool = False) -> int | float | None:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return None
+    text = re.sub(r"\s+", "", str(value)).replace(",", ".")
+    if not re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return None
+    number = float(text)
+    if not math.isfinite(number) or not (0 < number <= 1_000_000 if positive else 0 <= number <= 1_000_000):
+        return None
+    return int(number) if number.is_integer() else number
+
+
+def _unit_text(value: Any) -> str | None:
+    text = _clean(value, 30).casefold().rstrip(".")
+    aliases = {
+        "шт": "шт", "штук": "шт", "штука": "шт", "штуки": "шт", "pc": "шт", "pcs": "шт", "piece": "шт", "pieces": "шт",
+        "kg": "кг", "кг": "кг", "g": "г", "гр": "г", "г": "г", "ml": "мл", "мл": "мл",
+        "l": "л", "л": "л", "литр": "л", "литра": "л", "литров": "л", "м²": "м2", "м³": "м3",
+        "упак": "упак", "упаковка": "упак", "упаковки": "упак", "упаковок": "упак", "meter": "м", "meters": "м",
+    }
+    return aliases.get(text, text) if text else None
+
+
+def _quantity_unit(value: dict[str, Any]) -> str | None:
+    text = _unit_text(value.get("unitText"))
+    code = _UNIT_CODES.get(str(value.get("unitCode") or "").rsplit("/", 1)[-1].upper())
+    # Conflicting published units cannot safely be assigned to the quantity.
+    return None if text and code and text != code else text or code
+
+
+def _consistent_quantity(observations: list[tuple[int | float, str | None, str]]) -> tuple[int | float | None, str | None, str | None]:
+    amounts = {row[0] for row in observations}
+    units = {row[1] for row in observations if row[1]}
+    if len(amounts) != 1 or len(units) > 1:
+        return None, None, None
+    return observations[0][0], next(iter(units), None), observations[0][2][:220]
+
+
+def _stock_quantity(offer: dict[str, Any], evidence: str) -> tuple[int | float | None, str | None, str | None]:
+    observations = []
+    for key in ("inventoryLevel", "availableQuantity"):
+        level = offer.get(key)
+        raw = level.get("value") if isinstance(level, dict) else level
+        amount = _quantity_number(raw)
+        if amount is not None:
+            observations.append((amount, _quantity_unit(level if isinstance(level, dict) else offer), f"{key}: {json.dumps(level, ensure_ascii=False)}"))
+    for match in _STOCK_TEXT.finditer(evidence):
+        if re.search(r"\b(?:нет|не)\s*$", evidence[max(0, match.start() - 12):match.start()], re.I):
+            continue
+        amount = _quantity_number(match.group(1))
+        if amount is not None:
+            observations.append((amount, _unit_text(match.group(2)), match.group(0)))
+    return _consistent_quantity(observations)
+
+
+def _minimum_order(offer: dict[str, Any], evidence: str) -> tuple[int | float | None, str | None]:
+    observations = []
+    eligible = offer.get("eligibleQuantity")
+    if isinstance(eligible, dict):
+        amount = _quantity_number(eligible.get("minValue"), positive=True)
+        if amount is not None:
+            observations.append((amount, _quantity_unit(eligible), "eligibleQuantity.minValue"))
+    for key in ("minOrderQuantity", "minimumOrderQuantity"):
+        value = offer.get(key)
+        amount = _quantity_number(value.get("value") if isinstance(value, dict) else value, positive=True)
+        if amount is not None:
+            observations.append((amount, _quantity_unit(value if isinstance(value, dict) else offer), key))
+    for match in _MOQ_TEXT.finditer(evidence):
+        amount = _quantity_number(match.group(1), positive=True)
+        if amount is not None:
+            observations.append((amount, _unit_text(match.group(2)), match.group(0)))
+    amount, unit, _ = _consistent_quantity(observations)
+    return amount, unit
+
+
+def _url_identity(value: Any, page_url: str) -> tuple | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    parsed = urlparse(urljoin(page_url, value))
+    query = tuple(sorted((key, val) for key, val in parse_qsl(parsed.query) if not key.casefold().startswith("utm_") and key.casefold() not in {"gclid", "fbclid"}))
+    return parsed.scheme.casefold(), parsed.netloc.casefold(), parsed.path.rstrip("/"), query, parsed.fragment
+
+
+def _offer_identity_conflicts(product: dict[str, Any], offer: dict[str, Any], page_url: str, visible_sku: str | None) -> bool:
+    item = offer.get("itemOffered") if isinstance(offer.get("itemOffered"), dict) else {}
+    page_skus = {str(value).strip() for value in (product.get("sku"), visible_sku) if value is not None and str(value).strip()}
+    offer_skus = {str(value).strip() for value in (offer.get("sku"), item.get("sku")) if value is not None and str(value).strip()}
+    if len(page_skus) > 1 or len(offer_skus) > 1 or (page_skus and offer_skus and page_skus != offer_skus):
+        return True
+    page = urlparse(page_url)
+    selected = {key: value for key, value in parse_qsl(page.query) if re.fullmatch(
+        r"variant(?:_?id)?|variation(?:_?id)?|sku|size|colou?r|attribute_.*", key, re.I,
+    )}
+    for value in (offer.get("url"), item.get("url")):
+        if not isinstance(value, str):
+            continue
+        target = urlparse(urljoin(page_url, value))
+        # A merchant's external offer/checkout URL is not a variant mismatch.
+        # Only explicit contradictory selections in the same URL namespace count.
+        if target.hostname == page.hostname:
+            offered = dict(parse_qsl(target.query))
+            if any(key in offered and offered[key] != selected_value for key, selected_value in selected.items()):
+                return True
+    return False
+
+
+def _select_offer(product: dict[str, Any], page_url: str, visible_sku: str | None) -> tuple[dict[str, Any], str]:
+    if product.get("hasVariant"):
+        # A family's shared specifications cannot be silently inherited by a
+        # child just because one child offer URL matches. Keep it unresolved.
+        return {}, "ambiguous"
+    offers = product.get("offers") or {}
+    if isinstance(offers, dict) and str(offers.get("@type") or "").rsplit("/", 1)[-1].casefold() == "aggregateoffer":
+        offers = offers.get("offers") or []
+        if not offers:
+            return {}, "ambiguous"
+    if not isinstance(offers, list):
+        offer = offers if isinstance(offers, dict) else {}
+        return ({}, "ambiguous") if _offer_identity_conflicts(product, offer, page_url, visible_sku) else (offer, "single")
+    if not offers or any(not isinstance(offer, dict) for offer in offers):
+        return {}, "ambiguous"
+    if len(offers) == 1:
+        return ({}, "ambiguous") if _offer_identity_conflicts(product, offers[0], page_url, visible_sku) else (offers[0], "single")
+    target = _url_identity(page_url, page_url)
+    by_url = [offer for offer in offers if _url_identity(offer.get("url"), page_url) == target]
+    sku = str(visible_sku or product.get("sku") or "").strip()
+    by_sku = [offer for offer in offers if sku and str(offer.get("sku") or (offer.get("itemOffered").get("sku") if isinstance(offer.get("itemOffered"), dict) else "") or "").strip() == sku]
+    selected = by_url if len(by_url) == 1 else by_sku if len(by_sku) == 1 else []
+    if len(selected) == 1 and (not by_url or not by_sku or (len(by_url) == len(by_sku) == 1 and by_url[0] is by_sku[0])) and not _offer_identity_conflicts(product, selected[0], page_url, visible_sku):
+        return selected[0], "selected"
+    return {}, "ambiguous"
+
+
+def _price_basis(offer: dict[str, Any], price: float | None, currency: str | None, visible_prices: list[str]) -> tuple[int | float | None, str | None, str]:
+    observations = []
+    specifications = offer.get("priceSpecification") or []
+    if isinstance(specifications, dict):
+        specifications = [specifications]
+    for specification in specifications if isinstance(specifications, list) else []:
+        if not isinstance(specification, dict) or str(specification.get("@type") or "").rsplit("/", 1)[-1] != "UnitPriceSpecification":
+            continue
+        if specification.get("price") is not None and _price_number(specification["price"]) != price:
+            continue
+        if specification.get("priceCurrency") and specification["priceCurrency"] != currency:
+            continue
+        reference = specification.get("referenceQuantity")
+        if isinstance(reference, dict) and (amount := _quantity_number(reference.get("value"), positive=True)) is not None:
+            observations.append((amount, _quantity_unit(reference), "referenceQuantity"))
+    for text in visible_prices:
+        for match in re.finditer(rf"(\d[\d\s\u00a0\u202f]*(?:[.,]\d{{1,2}})?)\s*(₸|KZT|тенге|тг)\s*(?:/\s*|за\s+)(?:(\d+(?:[.,]\d+)?)\s*)?({_QUANTITY_UNITS})(?!\w)", text, re.I):
+            if currency == "KZT" and _price_number(match.group(1)) == price:
+                amount = _quantity_number(match.group(3) or 1, positive=True)
+                if amount is not None:
+                    observations.append((amount, _unit_text(match.group(4)), match.group(0)))
+    amount, unit, _ = _consistent_quantity(observations)
+    return (amount, unit, "published") if amount is not None and unit else (None, None, "unknown")
+
+
+def _certificate_documents(product: dict[str, Any], links: list[tuple[str, str]], page_url: str) -> list[dict[str, str]]:
+    candidates = list(links)
+    for key in ("subjectOf", "hasCertification"):
+        values = product.get(key) or []
+        if isinstance(values, dict):
+            values = [values]
+        for value in values if isinstance(values, list) else []:
+            if not isinstance(value, dict):
+                continue
+            label = _clean(value.get("name"), 180)
+            if key == "hasCertification" or _CERTIFICATE_TEXT.search(label):
+                candidates.append((value.get("contentUrl") or value.get("url"), label or "Документ о соответствии"))
+    documents = []
+    seen = set()
+    for href, label in candidates:
+        if not isinstance(href, str) or not href.strip() or href.startswith("#"):
+            continue
+        url = urljoin(page_url, href)
+        parsed = urlparse(url)
+        if not is_public_url(url) or parsed.username or parsed.password or url in seen:
+            continue
+        seen.add(url)
+        documents.append({"url": url, "label": label, "status": "unverified"})
+        if len(documents) == 10:
+            break
+    return documents
+
+
+def _wholesale_terms(evidence: str) -> str | None:
+    for line in re.split(r"[\n;]|(?<=[.!?])\s+", evidence):
+        if re.search(r"\b(?:оптом|оптов\w*\s+(?:цен\w*|заказ\w*|парт\w*|продаж\w*|поставк\w*)|wholesale)\b", line, re.I) and not re.search(
+            r"\bне\s+(?:(?:работа\w*|прода[её]\w*|явля\w*)\s+)?(?:оптом|оптов\w*)|\bбез\s+опт\w*|\bопт\w*(?:\s+цен\w*)?\s+(?:нет|отсутств\w*|не\s+(?:указ\w*|действ\w*))|\b(?:not|no)\s+wholesale\b|\bне\s+(?:принима\w*|работа\w*|прода[её]\w*)\b", line, re.I,
+        ):
+            return line.strip()[:220]
+    return None
 
 
 class _SellerContactParser(HTMLParser):
@@ -375,6 +555,9 @@ class _ProductDetailsParser(HTMLParser):
         self.description_open = True
         self.attributes_open = True
         self.section_heading: dict[str, Any] | None = None
+        self.document_section = False
+        self.document_link: dict[str, Any] | None = None
+        self.document_links: list[tuple[str, str]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
         attributes = dict(attrs)
@@ -395,6 +578,8 @@ class _ProductDetailsParser(HTMLParser):
         scoped = root or parent.get("scoped", False)
         entry = {"tag": tag, "ignored": ignored, "scoped": scoped, "field": parent.get("field")}
         if scoped and not ignored:
+            if tag == "a" and attributes.get("href") and (self.description_open or self.attributes_open or self.document_section):
+                self.document_link = {"entry": entry, "href": attributes["href"], "text": [attributes.get("title") or ""], "section": self.document_section}
             if tag in {"h2", "h3", "h4"}:
                 self.section_heading = {"entry": entry, "text": []}
             if self.attributes_open and re.search(r"(?:^|[-_\s])(?:attr|attribute|spec|property)row(?:\s|$)", classes):
@@ -410,6 +595,8 @@ class _ProductDetailsParser(HTMLParser):
     def handle_data(self, data: str):
         if not self.stack or self.stack[-1]["ignored"] or not self.stack[-1]["scoped"]:
             return
+        if self.document_link is not None:
+            self.document_link["text"].append(data)
         if self.row is not None:
             field = self.stack[-1].get("field")
             if field:
@@ -424,8 +611,14 @@ class _ProductDetailsParser(HTMLParser):
         if index is None:
             return
         removed = self.stack[index:]
+        if self.document_link is not None and any(self.document_link["entry"] is entry for entry in removed):
+            label = _clean(" ".join(self.document_link["text"]), 180)
+            if _CERTIFICATE_TEXT.search(label) or self.document_link["section"]:
+                self.document_links.append((self.document_link["href"], label or "Документ о соответствии"))
+            self.document_link = None
         if self.section_heading is not None and any(self.section_heading["entry"] is entry for entry in removed):
             label = _clean(" ".join(self.section_heading["text"])).casefold()
+            self.document_section = bool(_CERTIFICATE_TEXT.search(label))
             self.description_open = label in {"описание", "о товаре", "description", "product description"}
             self.attributes_open = self.description_open or bool(re.search(
                 r"характеристик|параметр|состав|материал|specification|product details|properties", label,
@@ -636,22 +829,25 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
         if key not in properties:
             properties[key] = value
 
-    offer = product.get("offers") or {}
-    if isinstance(offer, list):
-        offer = offer[0] if offer else {}
-    if not isinstance(offer, dict):
-        offer = {}
     commercial = _CommercialParser()
     commercial.feed(markup)
+    offer, variant_status = _select_offer(product, page_url, commercial.sku)
+    if commercial.variant_selector and variant_status == "single":
+        # A family price beside an unresolved size/colour selector is not a
+        # selected variant's offer, even when JSON-LD contains one default.
+        if commercial.sku and str(offer.get("sku") or "").strip() == commercial.sku:
+            variant_status = "selected"
+        else:
+            offer, variant_status = {}, "ambiguous"
     visible_price, visible_currency = commercial.price()
-    price = _price_number(offer.get("price") or offer.get("lowPrice"))
+    price = _price_number(offer.get("price"))
     currency = offer.get("priceCurrency") if price else None
-    if price is None:
+    if price is None and variant_status == "single":
         price = _price_number(parser.meta.get("product:price:amount"))
         currency = parser.meta.get("product:price:currency") if price else None
-    if price is None:
+    if price is None and variant_status == "single":
         price, currency = visible_price, visible_currency
-    elif visible_price is not None and (not currency or currency == visible_currency):
+    elif variant_status == "single" and visible_price is not None and (not currency or currency == visible_currency):
         # A scoped sale price displayed now can supersede an old JSON-LD amount.
         price, currency = visible_price, visible_currency
     image = (
@@ -660,15 +856,29 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
         or _image_url(parser.meta.get("twitter:image") or parser.meta.get("twitter:image:src"), page_url)
         or _best_page_image(parser.images, page_url, name or page_title)
     )
-    stock_quantity, stock_unit = _stock_quantity(offer, description, properties)
+    evidence = "\n".join(filter(None, [name, description, *[f"{k}: {v}" for k, v in properties.items()]]))[:6500]
+    commercial_evidence = "\n".join([description, *[f"{key}: {value}" for key, value in properties.items()], *commercial.stock_labels]) if variant_status == "single" else ""
+    stock_quantity, stock_unit, stock_evidence = _stock_quantity(offer, commercial_evidence)
+    min_order_quantity, min_order_unit = _minimum_order(offer, commercial_evidence)
+    price_quantity, price_unit, price_basis_status = _price_basis(offer, price, currency, commercial.prices if variant_status == "single" else [])
+    wholesale_terms = _wholesale_terms(commercial_evidence if variant_status == "single" else _clean(offer.get("description"), 2400))
     availability = _availability(offer.get("availability"))
-    visible_availability = commercial.availability()
+    visible_availability = commercial.availability() if variant_status == "single" else None
     if not availability or visible_availability in {"OutOfStock", "SoldOut", "PreOrder", "BackOrder", "Discontinued"}:
         availability = visible_availability or availability
+    if re.search(r"(?:^|[\n;.!?])\s*(?:наличие\s*[:—-]\s*)?(?:нет\s+в\s+наличии|out\s+of\s+stock)\b", commercial_evidence, re.I):
+        availability = "OutOfStock"
     if stock_quantity == 0:
         availability = "OutOfStock"
+    if variant_status == "ambiguous":
+        price = currency = availability = stock_quantity = stock_unit = stock_evidence = None
+        min_order_quantity = min_order_unit = price_quantity = price_unit = wholesale_terms = None
+        price_basis_status = "unknown"
     seller_name, seller_phones = _seller_details(offer, markup, page_url)
-    evidence = "\n".join(filter(None, [name, description, *[f"{k}: {v}" for k, v in properties.items()]]))[:6500]
+    certificate_documents = _certificate_documents(product, details.document_links, page_url)
+    certificate_claim = any(_CERTIFICATE_TEXT.search(line) and not re.search(
+        r"\bнет\s+сертификат\w*|\bбез\s+сертификат\w*|\bне\s+(?:соответств\w*|сертифицир\w*|требу\w*)|отсутств\w*", line, re.I,
+    ) for line in evidence.splitlines())
     return {
         "is_product_page": True,
         "page_verified": True,
@@ -678,11 +888,21 @@ def parse_product_page(markup: str, page_url: str) -> dict[str, Any]:
         "image_url": image,
         "price": price,
         "currency": currency if price else None,
+        "price_quantity": price_quantity,
+        "price_unit": price_unit,
+        "price_basis_status": price_basis_status,
         "availability": availability,
         "canonical_url": urljoin(page_url, parser.canonical) if parser.canonical and urlparse(urljoin(page_url, parser.canonical)).hostname == urlparse(page_url).hostname else None,
-        "product_sku": _clean(str(product["sku"]), 120) if product.get("sku") is not None else commercial.sku,
+        "product_sku": None if variant_status == "ambiguous" else _clean(str(offer.get("sku") or product.get("sku") or commercial.sku or ""), 120) or None,
+        "variant_status": variant_status,
         "stock_quantity": stock_quantity,
         "stock_unit": stock_unit,
+        "stock_evidence": stock_evidence,
+        "min_order_quantity": min_order_quantity,
+        "min_order_unit": min_order_unit,
+        "wholesale_terms": wholesale_terms,
+        "certificate_status": "document_linked" if certificate_documents else "claim_only" if certificate_claim else "missing",
+        "certificate_documents": certificate_documents,
         "seller_name": seller_name,
         "seller_phone": seller_phones[0] if seller_phones else None,
         "seller_phones": seller_phones,

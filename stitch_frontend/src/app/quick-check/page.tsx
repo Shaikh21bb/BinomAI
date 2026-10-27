@@ -4,9 +4,9 @@ import { useEffect, useRef, useState, type DragEvent, type FormEvent } from 'rea
 import Link from 'next/link';
 import { AppShell } from '@/components/AppShell';
 import { ProductDiscoveryCards, isVerifiedProductLead, type DiscoveryLead } from '@/components/ProductDiscoveryCards';
-import { CLOSURE_POLICY_LABELS, productDiscoveryCsv, quickCheckProgressLabel, reportConfirmationGaps, reportItemHasProductCards, reportItemMatchesFilter, supportsClosureClarification, visibleProductLeads, type ClosurePolicy, type DiscoveryResultFilter } from '@/lib/productDiscovery';
+import { CLOSURE_POLICY_LABELS, effectiveProductCheckStatus, isConfirmedProductOffer, orderQuantityAssessment, productDiscoveryCsv, quickCheckProgressLabel, reportConfirmationGaps, reportItemHasProductCards, reportItemMatchesFilter, supportsClosureClarification, visibleProductLeads, type ClosurePolicy, type DiscoveryResultFilter } from '@/lib/productDiscovery';
 import { api, errorMessage } from '@/lib/api';
-import { assessStock, displayUnit } from '@/lib/productStock';
+import { displayUnit } from '@/lib/productStock';
 
 interface PdfItem {
   product_name: string;
@@ -426,15 +426,16 @@ export default function QuickCheckPage() {
   }
 
   const summary = items.reduce((total, item) => {
-    const relevant = item.state === 'ready' ? visibleProductLeads(item.results) : [];
+    const relevant = item.state === 'ready' ? visibleProductLeads(item.results, 'all', item.quantity, item.unit) : [];
     for (const lead of relevant) {
       total.cards += 1;
+      if (isConfirmedProductOffer(lead, item.quantity, item.unit)) total.orderReady += 1;
       if (isVerifiedProductLead(lead)) total.confirmedTypes += 1;
-      const assessment = assessStock(item.quantity, item.unit, lead.page_verified ? lead.stock_quantity : null, lead.page_verified ? lead.stock_unit : null, lead.page_verified ? lead.availability : null);
+      const assessment = orderQuantityAssessment(lead, item.quantity, item.unit);
       total[assessment.verdict] += 1;
     }
     return total;
-  }, { cards: 0, confirmedTypes: 0, enough: 0, shortage: 0, unknown: 0 });
+  }, { cards: 0, orderReady: 0, confirmedTypes: 0, enough: 0, shortage: 0, unknown: 0 });
 
   return (
     <AppShell>
@@ -547,13 +548,13 @@ export default function QuickCheckPage() {
                 </div>
               ))}
             </div>
-            <p className="flex items-start gap-2 text-label-sm text-on-surface-variant"><span aria-hidden="true" className="material-symbols-outlined text-[16px]">info</span>Среди {summary.cards} найденных карточек тип товара подтверждён у {summary.confirmedTypes}. Остальные карточки — кандидаты для проверки. Соответствие всем требованиям ТЗ и достаточность остатка оцениваются отдельно.</p>
+            <p className="flex items-start gap-2 text-label-sm text-on-surface-variant"><span aria-hidden="true" className="material-symbols-outlined text-[16px]">info</span>Готовы к указанному в документе заказу: {summary.orderReady} из {summary.cards} карточек. Подтверждение типа товара ({summary.confirmedTypes}) и отметка «В наличии» сами по себе не подтверждают количество, оптовые условия или документы.</p>
             <div className="flex flex-wrap items-center gap-2 border-b border-outline-variant pb-4" aria-label="Фильтр позиций">
               {([
                 { id: 'all', label: 'Все позиции', count: items.length },
                 { id: 'with-cards', label: 'С карточками', count: matchedItems },
                 { id: 'requirements', label: 'ТЗ подтверждено', count: requirementsItems },
-                { id: 'combined', label: 'ТЗ + наличие + контакты', count: combinedItems },
+                { id: 'combined', label: 'Готовы к заказу', count: combinedItems },
                 { id: 'in-stock', label: 'В наличии', count: inStockItems },
                 { id: 'complete', label: 'С фото, ценой и контактом', count: completeItems },
                 { id: 'without-cards', label: 'Без карточек', count: withoutCards },
@@ -563,7 +564,7 @@ export default function QuickCheckPage() {
             {resultFilter === 'in-stock' && <p className="text-body-sm text-on-surface-variant">Показаны прочитанные товарные страницы с подтверждённым типом и опубликованной отметкой «В наличии». Достаточность количества для заказа проверяется отдельно.</p>}
             {resultFilter === 'complete' && <p className="text-body-sm text-on-surface-variant">Есть фото товара, положительная цена с валютой и опубликованный телефон. Эти сведения не подтверждают наличие или полное соответствие ТЗ.</p>}
             {resultFilter === 'requirements' && <p className="text-body-sm text-on-surface-variant">Все выделенные требования к товару подтверждены сведениями с прочитанной страницы, включая хотя бы одну техническую характеристику. Сверьте полноту требований с исходным ТЗ; наличие и количество проверяются отдельно.</p>}
-            {resultFilter === 'combined' && <p className="text-body-sm text-on-surface-variant">Одновременно подтверждены все выделенные требования, на странице указано наличие, опубликованы фото, цена и телефон. Сверьте полноту требований с исходным ТЗ; достаточность количества и невыделенные документы или сертификаты ещё требуют проверки.</p>}
+            {resultFilter === 'combined' && <p className="text-body-sm text-on-surface-variant">Проверка сервера подтверждает именно количество и единицу этой позиции: требования ТЗ, достаточный остаток, минимальный заказ, вариант товара, основание цены и опубликованные оптовые условия. Непроверенные сертификаты и неизвестные сведения исключают готовность к заказу.</p>}
             {retryNotice && <div role="status" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-body-sm text-on-surface"><p>{retryNotice}</p>{resultFilter !== 'all' && <button type="button" onClick={() => setResultFilter('all')} className="text-primary hover:underline">Показать все позиции</button>}</div>}
             {!visibleItems.length && <div className="rounded-xl border border-dashed border-outline-variant bg-surface-container-lowest px-5 py-10 text-center"><span aria-hidden="true" className="material-symbols-outlined text-[30px] text-on-surface-variant">filter_list_off</span><p className="mt-2 text-body-md font-semibold text-on-surface">{items.length ? resultFilter === 'combined' ? 'Подтверждённых предложений по всем условиям пока нет' : 'В этом разделе пока нет позиций' : 'В документе не найдены позиции товаров'}</p><p className="mx-auto mt-1 max-w-md text-body-sm text-on-surface-variant">{items.length ? activeSearch ? 'Поиск продолжается. Новые результаты появятся автоматически.' : resultFilter === 'combined' ? matchedItems ? 'Найденные кандидаты сохранены. Ниже показано, какие подтверждения ещё отсутствуют.' : 'Подтверждённых товарных страниц с нужными сведениями пока нет. Откройте все позиции и повторите поиск.' : 'Выберите другой фильтр, чтобы посмотреть результаты проверки.' : 'Проверьте, что документ содержит названия товаров и требования к ним, и загрузите спецификацию снова.'}</p>{resultFilter === 'combined' && combinedGaps.length > 0 && <ul className="mx-auto mt-4 max-w-xl space-y-2 text-left text-body-sm text-on-surface-variant">{combinedGaps.map((gap) => <li key={gap.code} className="flex items-start gap-2"><span aria-hidden="true" className="material-symbols-outlined mt-0.5 text-[16px] text-amber-600">info</span><span>{gap.label}</span></li>)}</ul>}{resultFilter !== 'all' && <button type="button" onClick={() => setResultFilter('all')} className="mt-4 text-label-md text-primary hover:underline">Показать все позиции и причины</button>}</div>}
             {visibleItems.map(({ item, index }) => (
@@ -591,14 +592,14 @@ export default function QuickCheckPage() {
                 {item.state === 'ready' ? <>
                   <ProductDiscoveryCards productName={item.product_name} leads={item.results} requestedQuantity={item.quantity} requestedUnit={item.unit} leadFilter={leadFilter} />
                   {(() => {
-                    const best = visibleProductLeads(item.results, leadFilter).find(isVerifiedProductLead);
+                    const best = visibleProductLeads(item.results, leadFilter, item.quantity, item.unit).find(isVerifiedProductLead);
                     if (!best?.checks?.length) return null;
                     return <details className="group border-t border-outline-variant bg-surface-container-low px-4 py-4 md:px-5">
                       <summary className="cursor-pointer text-body-sm font-semibold text-on-surface">Доказательства по первому найденному товару <span className="ml-1 text-label-sm font-normal text-on-surface-variant">({best.checks.length})</span></summary>
                       <p className="mt-1 text-body-sm text-on-surface-variant">{best.title || 'Товар без названия'} · сведения с открытой страницы продавца</p>
                       {best.url && <a href={best.url} target="_blank" rel="noopener noreferrer" className="mt-2 inline-flex items-center gap-1 text-label-sm text-primary hover:underline">Открыть источник<span aria-hidden="true" className="material-symbols-outlined text-[15px]">open_in_new</span></a>}
                       <div className="mt-3 space-y-2">
-                        {(best.checks ?? []).map((check, checkIndex) => (
+                        {(best.checks ?? []).map((check) => ({ ...check, status: effectiveProductCheckStatus(check) })).map((check, checkIndex) => (
                           <div key={`${check.id || checkIndex}-${checkIndex}`} className="grid gap-1 rounded-lg border border-outline-variant bg-surface-container-lowest p-3 text-body-sm md:grid-cols-[minmax(0,1fr)_125px_minmax(0,1fr)] md:gap-3">
                             <span className="font-medium text-on-surface">{check.requirement}</span>
                             <span className={check.status === 'matched' ? 'text-emerald-700' : check.status === 'mismatch' ? 'text-rose-700' : 'text-amber-700'}>{check.status === 'matched' ? 'Подтверждено' : check.status === 'mismatch' ? 'Расхождение' : 'Нет данных'}</span>

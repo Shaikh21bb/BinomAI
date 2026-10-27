@@ -95,8 +95,21 @@ def _best_discovery_lead(item: ProductSearchItem) -> dict | None:
         and lead.get("url")
         and urlsplit(str(lead.get("url"))).scheme in {"http", "https"}
         and lead.get("match_status") in {"matched", "partial"}
+        and _discovery_price_basis(lead) is not None
     ]
     return max(candidates, key=_discovery_lead_score, default=None)
+
+
+def _discovery_price_basis(lead: dict) -> tuple[Decimal, str] | None:
+    """A discovered quote must not invent per-piece pricing or buyer units."""
+    value, unit = lead.get("price_quantity"), lead.get("price_unit")
+    if lead.get("price_basis_status") != "published" or isinstance(value, bool) or not isinstance(unit, str) or not normalize_unit(unit):
+        return None
+    try:
+        quantity = Decimal(str(value))
+        return (quantity, unit) if quantity.is_finite() and quantity > 0 else None
+    except (ValueError, ArithmeticError):
+        return None
 
 
 def _new_discovery_offer(
@@ -106,6 +119,10 @@ def _new_discovery_offer(
     item: ProductSearchItem,
     lead: dict,
 ) -> SupplierOffer:
+    price_basis = _discovery_price_basis(lead)
+    if price_basis is None or not lead.get("currency"):
+        raise HTTPException(status_code=422, detail="В источнике не подтверждены единица и основа цены. Внесите уточнённое предложение вручную.")
+    price_quantity, price_unit = price_basis
     source_url = str(lead.get("url") or "")
     match_status = str(lead.get("match_status") or "unknown")
     compliance_status = {
@@ -122,11 +139,12 @@ def _new_discovery_offer(
         item_id=item.id,
         supplier_name=str(lead.get("shop") or host)[:500],
         original_item_name=str(lead.get("title") or item.product_name)[:500],
-        original_unit=item.unit,
+        original_unit=price_unit,
         unit_price=lead["price"],
-        price_quantity=1,
-        currency=str(lead.get("currency") or "KZT"),
-        available_quantity=lead.get("stock_quantity"),
+        price_quantity=price_quantity,
+        currency=str(lead["currency"]),
+        available_quantity=lead.get("stock_quantity") if normalize_unit(lead.get("stock_unit")) == normalize_unit(price_unit) else None,
+        moq=lead.get("min_order_quantity") if normalize_unit(lead.get("min_order_unit")) == normalize_unit(price_unit) else None,
         characteristics=characteristics,
         compliance_status=compliance_status,
         compliance_notes=_discovery_compliance_notes(lead),

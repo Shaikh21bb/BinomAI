@@ -300,6 +300,200 @@ def test_published_inventory_count_is_separate_from_availability():
     assert sold_out["stock_quantity"] == 0
 
 
+@pytest.mark.parametrize("level,expected_quantity,expected_unit", [
+    ({"value": "2,5", "unitCode": "KGM"}, 2.5, "кг"),
+    ({"value": 18, "unitCode": "H87"}, 18, "шт"),
+    ({"value": 18, "unitCode": "PCE"}, 18, "шт"),
+    ({"value": 18, "unitCode": "C62"}, 18, "ед."),
+    ({"value": "12.75", "unitText": "м"}, 12.75, "м"),
+    ({"value": 4, "unitCode": "UNKNOWN"}, 4, None),
+    ({"value": 4, "unitText": "кг", "unitCode": "H87"}, 4, None),
+    (18, 18, None),
+    (True, None, None),
+    ("NaN", None, None),
+    ("Infinity", None, None),
+    (-1, None, None),
+    (1000001, None, None),
+])
+def test_inventory_decimals_units_and_bounds_never_invent_pieces(level, expected_quantity, expected_unit):
+    page = parse_product_page(_markup({"@type": "Product", "name": "Кабель ABC", "offers": {"inventoryLevel": level}}, "Кабель ABC"), "https://shop.example.kz/p/cable")
+    assert page["stock_quantity"] == expected_quantity
+    assert page["stock_unit"] == expected_unit
+    assert bool(page["stock_evidence"]) == (expected_quantity is not None)
+
+
+def test_scoped_visible_decimal_stock_and_minimum_order_are_distinct_from_buy_buttons():
+    markup = _markup({"@type": "Product", "name": "Кабель ABC"}, "Кабель ABC").replace("</body>", '''
+      <nav>В наличии: 999 шт. Минимальный заказ: 500 шт. Оптовая цена</nav>
+      <div class="product type-product"><h1 class="product_title">Кабель ABC</h1>
+        <p class="stock">В наличии: 22,5 м</p><button>Купить 100</button>
+        <div class="product-description"><p>Минимальная партия: 2,5 м. Продаём оптом.</p></div>
+      </div></body>''')
+    page = parse_product_page(markup, "https://shop.example.kz/p/cable")
+    assert page["stock_quantity"] == 22.5
+    assert page["stock_unit"] == "м"
+    assert page["stock_evidence"] == "В наличии: 22,5 м"
+    assert page["min_order_quantity"] == 2.5
+    assert page["min_order_unit"] == "м"
+    assert page["wholesale_terms"] == "Продаём оптом."
+
+
+def test_structured_minimum_order_has_its_own_unit_and_unknown_does_not_default_to_one():
+    page = parse_product_page(_markup({"@type": "Product", "name": "Кабель ABC", "offers": {
+        "inventoryLevel": {"value": 50, "unitCode": "MTR"},
+        "eligibleQuantity": {"minValue": "2.5", "unitCode": "MTR"},
+    }}, "Кабель ABC"), "https://shop.example.kz/p/cable")
+    assert (page["min_order_quantity"], page["min_order_unit"]) == (2.5, "м")
+    unknown = parse_product_page(_markup({"@type": "Product", "name": "Кабель ABC"}, "Кабель ABC"), "https://shop.example.kz/p/cable")
+    assert unknown["min_order_quantity"] is None
+    assert unknown["min_order_unit"] is None
+    assert unknown["wholesale_terms"] is None
+
+
+@pytest.mark.parametrize("description", ["Не продаём оптом.", "Оптовая цена отсутствует.", "Оптовая цена не указана.", "Это не является оптовой ценой.", "Not wholesale.", "No wholesale orders.", "Оптовые заказы не принимаем.", "С оптовыми заказами не работаем.", "Не работаем с оптом."])
+def test_negated_wholesale_claims_do_not_publish_wholesale_terms(description):
+    page = parse_product_page(_markup({"@type": "Product", "name": "Товар ABC", "description": description}, "Товар ABC"), "https://shop.example.kz/p/item")
+    assert page["wholesale_terms"] is None
+
+
+def test_recommendation_identifiers_and_navigation_cannot_supply_visible_stock():
+    markup = '<title>Товар ABC</title><div class="product type-product"><h1 class="product_title">Товар ABC</h1><section id="recommendations"><p class="stock">В наличии: 999 шт</p></section><nav><p class="stock">В наличии: 888 шт</p></nav></div>'
+    page = parse_product_page(markup, "https://shop.example.kz/p/item")
+    assert page["stock_quantity"] is None
+    assert page["availability"] is None
+
+
+def test_conflicting_stock_or_minimum_order_publications_stay_unknown():
+    page = parse_product_page(_markup({"@type": "Product", "name": "Кабель ABC", "description": "Остаток: 3 м. Минимальный заказ: 5 м.", "offers": {
+        "inventoryLevel": {"value": 50, "unitCode": "MTR"}, "eligibleQuantity": {"minValue": 10, "unitCode": "MTR"},
+    }}, "Кабель ABC"), "https://shop.example.kz/p/cable")
+    assert page["stock_quantity"] is None
+    assert page["min_order_quantity"] is None
+
+
+def test_negated_own_stock_text_cannot_confirm_quantity_or_override_outofstock():
+    page = parse_product_page(_markup({"@type": "Product", "name": "Кабель ABC", "description": "Нет в наличии: 20 шт.", "offers": {"availability": "https://schema.org/InStock"}}, "Кабель ABC"), "https://shop.example.kz/p/cable")
+    assert page["stock_quantity"] is None
+    assert page["availability"] == "OutOfStock"
+    known = parse_product_page(_markup({"@type": "Product", "name": "Кабель ABC", "description": "Нет в наличии", "offers": {"availability": "https://schema.org/InStock", "inventoryLevel": {"value": 100, "unitCode": "H87"}}}, "Кабель ABC"), "https://shop.example.kz/p/cable")
+    assert known["availability"] == "OutOfStock"
+
+
+def test_price_basis_requires_its_own_unit_price_publication():
+    page = parse_product_page(_markup({"@type": "Product", "name": "Материал ABC", "offers": {
+        "price": "2500", "priceCurrency": "KZT", "priceSpecification": {"@type": "UnitPriceSpecification", "price": 2500,
+          "priceCurrency": "KZT", "referenceQuantity": {"value": "2.5", "unitCode": "KGM"}},
+    }}, "Материал ABC"), "https://shop.example.kz/p/material")
+    assert (page["price_quantity"], page["price_unit"], page["price_basis_status"]) == (2.5, "кг", "published")
+    unknown = parse_product_page(_markup({"@type": "Product", "name": "Материал ABC", "offers": {"price": 2500, "priceCurrency": "KZT"}}, "Материал ABC"), "https://shop.example.kz/p/material")
+    assert unknown["price_quantity"] is None
+    assert unknown["price_unit"] is None
+    assert unknown["price_basis_status"] == "unknown"
+
+
+@pytest.mark.parametrize("visible,expected", [("2500 ₸/шт", (1, "шт", "published")), ("2500 ₸ за 100 мл", (100, "мл", "published")), ("2500 ₸", (None, None, "unknown"))])
+def test_only_scoped_explicit_visible_price_basis_is_used(visible, expected):
+    markup = f'<title>Товар ABC</title><p class="price">1 ₸/шт</p><div class="product type-product"><h1 class="product_title">Товар ABC</h1><p class="price">{visible}</p><section class="related"><p class="price">2500 ₸/кг</p></section></div>'
+    page = parse_product_page(markup, "https://shop.example.kz/p/item")
+    assert (page["price_quantity"], page["price_unit"], page["price_basis_status"]) == expected
+
+
+def _variant_product():
+    return {"@type": "Product", "name": "Товар ABC", "description": "В наличии: 999 шт. Минимальный заказ: 1 шт. Оптовая цена.", "offers": [
+        {"url": "https://shop.example.kz/p/item?size=S", "sku": "SKU-S", "price": 1000, "priceCurrency": "KZT", "availability": "https://schema.org/InStock", "inventoryLevel": {"value": 100, "unitCode": "H87"}},
+        {"url": "https://shop.example.kz/p/item?size=M", "sku": "SKU-M", "price": 2000, "priceCurrency": "KZT", "availability": "https://schema.org/OutOfStock", "inventoryLevel": {"value": 0, "unitCode": "H87"}},
+    ]}
+
+
+def test_exact_variant_url_keeps_price_and_stock_from_the_same_offer():
+    page = parse_product_page(_markup(_variant_product(), "Товар ABC"), "https://shop.example.kz/p/item?size=M")
+    assert page["variant_status"] == "selected"
+    assert (page["price"], page["availability"], page["stock_quantity"], page["product_sku"]) == (2000, "OutOfStock", 0, "SKU-M")
+    assert page["min_order_quantity"] is None
+    assert page["wholesale_terms"] is None
+
+
+def test_unique_published_sku_can_select_offer_but_conflicting_url_cannot():
+    product = _variant_product()
+    product["sku"] = "SKU-M"
+    selected = parse_product_page(_markup(product, "Товар ABC"), "https://shop.example.kz/p/item")
+    assert selected["variant_status"] == "selected"
+    assert selected["price"] == 2000
+    conflicting = parse_product_page(_markup(product, "Товар ABC"), "https://shop.example.kz/p/item?size=S")
+    assert conflicting["variant_status"] == "ambiguous"
+    assert conflicting["price"] is None
+
+
+@pytest.mark.parametrize("as_list,sku_field", [(False, {"sku": "SOAP750"}), (True, {"itemOffered": {"sku": "SOAP750"}})])
+def test_single_offer_with_conflicting_main_sku_cannot_supply_commercial_fields(as_list, sku_field):
+    offer = {**sku_field, "price": 1250, "priceCurrency": "KZT", "availability": "https://schema.org/InStock", "inventoryLevel": {"value": 24, "unitCode": "H87"}, "eligibleQuantity": {"minValue": 5, "unitCode": "H87"}}
+    product = {"@type": "Product", "name": "Мыло жидкое 500 мл", "sku": "SOAP500", "description": "Оптовая цена.", "offers": [offer] if as_list else offer}
+    page = parse_product_page(_markup(product, "Мыло жидкое 500 мл"), "https://shop.example.kz/p/soap500")
+    assert page["variant_status"] == "ambiguous"
+    assert page["product_sku"] is None
+    for field in ("price", "currency", "stock_quantity", "stock_unit", "min_order_quantity", "min_order_unit", "availability", "wholesale_terms"):
+        assert page[field] is None, field
+
+
+def test_single_offer_cannot_override_visible_sku_or_explicit_selected_variant_url():
+    product = {"@type": "Product", "name": "Товар ABC", "offers": {"sku": "SKU-S", "url": "https://shop.example.kz/p/item?size=S", "price": 1000}}
+    visible = _markup(product, "Товар ABC").replace("</body>", '<div class="product type-product"><h1 class="product_title">Товар ABC</h1><span class="sku">SKU-M</span></div></body>')
+    assert parse_product_page(visible, "https://shop.example.kz/p/item")["variant_status"] == "ambiguous"
+    assert parse_product_page(_markup(product, "Товар ABC"), "https://shop.example.kz/p/item?size=M")["variant_status"] == "ambiguous"
+    product["offers"]["url"] = "https://merchant.example.com/checkout?size=S"
+    product["sku"] = "SKU-S"
+    assert parse_product_page(_markup(product, "Товар ABC"), "https://shop.example.kz/p/item")["variant_status"] == "single"
+
+
+def test_ambiguous_variants_cannot_refill_commercial_data_from_shared_meta_or_dom():
+    markup = _markup(_variant_product(), "Товар ABC").replace("</head>", '<meta property="product:price:amount" content="123"><meta property="product:price:currency" content="KZT"></head>').replace("</body>", '''
+      <div class="product type-product instock"><h1 class="product_title">Товар ABC</h1>
+        <p class="price">123 ₸/шт</p><p class="stock">В наличии: 500 шт</p>
+      </div></body>''')
+    page = parse_product_page(markup, "https://shop.example.kz/p/item")
+    assert page["variant_status"] == "ambiguous"
+    for field in ("price", "currency", "stock_quantity", "stock_unit", "stock_evidence", "availability", "min_order_quantity", "min_order_unit", "price_quantity", "price_unit", "wholesale_terms"):
+        assert page[field] is None, field
+    assert page["price_basis_status"] == "unknown"
+
+
+def test_aggregate_lowest_price_and_nested_family_variants_are_not_selected_offers():
+    for extra in ({"offers": {"@type": "AggregateOffer", "lowPrice": 1000, "highPrice": 5000, "priceCurrency": "KZT"}},
+                  {"hasVariant": [{"@type": "Product", "name": "Товар ABC M", "url": "https://shop.example.kz/p/item?size=M", "offers": {"price": 5000}}]}):
+        page = parse_product_page(_markup({"@type": "Product", "name": "Товар ABC", **extra}, "Товар ABC"), "https://shop.example.kz/p/item?size=M")
+        assert page["variant_status"] == "ambiguous"
+        assert page["price"] is None
+
+
+def test_unresolved_visible_variant_selector_cannot_turn_default_offer_into_single_variant():
+    markup = _markup({"@type": "Product", "name": "Товар ABC", "offers": {"price": 1000, "availability": "https://schema.org/InStock"}}, "Товар ABC").replace("</body>", '<div class="product type-product"><h1 class="product_title">Товар ABC</h1><form class="variations_form"><select name="attribute_size"><option>S</option><option>M</option></select></form></div></body>')
+    page = parse_product_page(markup, "https://shop.example.kz/p/item")
+    assert page["variant_status"] == "ambiguous"
+    assert page["price"] is None
+    assert page["availability"] is None
+
+
+def test_product_certificate_links_are_scoped_unverified_and_never_proof_from_flags():
+    markup = _markup({"@type": "Product", "name": "Товар ABC", "certificate_status": "verified"}, "Товар ABC").replace("</body>", '''
+      <nav><a href="/nav.pdf">Сертификат</a></nav><h1>Товар ABC</h1>
+      <div class="product-description"><h3>Сертификаты</h3><a href="/docs/cert.pdf">ГОСТ 25295-2003</a>
+        <a href="/docs/cert.pdf">Сертификат</a><a href="#cert">Сертификат</a>
+        <a href="http://127.0.0.1/private.pdf">Сертификат</a><a href="javascript:alert(1)">Сертификат</a>
+        <h3>Доставка и возврат</h3><a href="/delivery.pdf">Сертификат другого товара</a>
+        <section id="recommendations"><a href="/other.pdf">Сертификат</a></section>
+      </div><footer><a href="/footer.pdf">Сертификат</a></footer></body>''')
+    page = parse_product_page(markup, "https://shop.example.kz/p/item")
+    assert page["certificate_status"] == "document_linked"
+    assert page["certificate_documents"] == [{"url": "https://shop.example.kz/docs/cert.pdf", "label": "ГОСТ 25295-2003", "status": "unverified"}]
+
+
+@pytest.mark.parametrize("description,expected", [("Соответствует ГОСТ 25295-2003", "claim_only"), ("Нет сертификата ГОСТ 25295-2003", "missing"), ("Товар ABC", "missing")])
+def test_plain_standard_or_page_claim_never_verifies_certificate(description, expected):
+    page = parse_product_page(_markup({"@type": "Product", "name": "Товар ABC", "description": description, "verified": True}, "Товар ABC"), "https://shop.example.kz/p/item")
+    assert page["certificate_status"] == expected
+    assert page["certificate_documents"] == []
+
+
 def test_search_listing_with_nested_product_is_not_a_product_card():
     page = parse_product_page(
         _markup(

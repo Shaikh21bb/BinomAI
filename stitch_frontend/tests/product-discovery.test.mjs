@@ -3,10 +3,14 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import ts from 'typescript';
 
+const compilerOptions = { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 };
+const stockOutput = ts.transpileModule(readFileSync(new URL('../src/lib/productStock.ts', import.meta.url), 'utf8'), { compilerOptions }).outputText;
+const stockModuleUrl = `data:text/javascript;base64,${Buffer.from(stockOutput).toString('base64')}`;
 const { outputText } = ts.transpileModule(readFileSync(new URL('../src/lib/productDiscovery.ts', import.meta.url), 'utf8'), {
-  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+  compilerOptions,
 });
-const { CLOSURE_POLICY_LABELS, canRecommendProductLead, canonicalProductUrl, hasConfirmedProductRequirements, isCompleteProductLead, isConfirmedProductOffer, isMatchingInStockLead, isVerifiedProductLead, productConfirmationGaps, productQuantityMessage, productVerificationScope, quickCheckProgressLabel, visibleProductLeads, reportConfirmationGaps, reportItemHasProductCards, reportItemMatchesFilter, supportsClosureClarification, publishedProductPhones, productDiscoveryCsv } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
+const source = outputText.replace(/(['"])\.\/productStock\1/, JSON.stringify(stockModuleUrl));
+const { CLOSURE_POLICY_LABELS, canRecommendProductLead, canonicalProductUrl, effectiveProductCheckStatus, hasConfirmedProductRequirements, isCompleteProductLead, isConfirmedProductOffer, isMatchingInStockLead, isVerifiedProductLead, orderQuantityAssessment, productConfirmationGaps, productQuantityMessage, productVerificationScope, quickCheckProgressLabel, visibleProductLeads, reportConfirmationGaps, reportItemHasProductCards, reportItemMatchesFilter, supportsClosureClarification, publishedProductPhones, productDiscoveryCsv } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
 const candidate = {
   title: 'ДЕМО QA — кандидат товара', url: 'https://supplier.example.test/products/qa',
@@ -23,6 +27,14 @@ const verified = {
   ],
 };
 const item = (results, state = 'ready') => ({ product_name: 'ДЕМО QA — позиция ТЗ', quantity: 2, unit: 'шт.', state, results });
+const readyLead = (quantity = 20, unit = 'шт.') => ({
+  ...verified, match_status: 'matched', checks: verified.checks.map((check) => ({ ...check, status: 'matched' })),
+  availability: 'InStock', image_url: 'https://supplier.example.test/product-photo.jpg', price: 12000, currency: 'KZT',
+  stock_quantity: quantity + 5, stock_unit: unit, min_order_quantity: 1, min_order_unit: unit,
+  price_quantity: 1, price_unit: unit, price_basis_status: 'published',
+  variant_status: 'single', wholesale_terms: 'ДЕМО QA — опубликованные условия: минимальный оптовый заказ 1 единица.',
+  order_readiness: { status: 'ready', gaps: [], quantity: { status: 'enough', requested_quantity: quantity, requested_unit: unit, stock_quantity: quantity + 5, stock_unit: unit, reason: 'ДЕМО QA: опубликованный остаток для этого количества.' } },
+});
 
 test('a blocked product page remains a visible candidate and belongs to the with-cards filter', () => {
   assert.equal(visibleProductLeads([searchLink, candidate]).length, 1);
@@ -45,7 +57,7 @@ test('unverified, unknown and mismatched candidates cannot receive a recommendat
   assert.equal(canRecommendProductLead({ ...verified, match_status: 'unknown' }), false);
   assert.equal(canRecommendProductLead({ ...verified, match_status: 'mismatch' }), false);
   assert.equal(canRecommendProductLead(verified), false, 'confirmed type with unknown technical specs is insufficient for a recommendation');
-  assert.equal(canRecommendProductLead({ ...verified, checks: [...verified.checks, { id: 'certificate', status: 'matched' }] }), true);
+  assert.equal(canRecommendProductLead({ ...verified, checks: [...verified.checks, { id: 'certificate', status: 'matched' }] }), false);
 });
 
 test('a type-only match cannot claim complete technical compliance or receive a recommendation', () => {
@@ -68,7 +80,7 @@ test('technical evidence is counted separately from product type confirmation', 
   assert.equal(scope.label, null);
   assert.equal(scope.explanation, null);
   const full = { ...verified, match_status: 'matched', checks: verified.checks.map((check) => ({ ...check, status: 'matched' })) };
-  assert.equal(canRecommendProductLead(full), true);
+  assert.equal(canRecommendProductLead(full), false, 'technical matching cannot replace server order readiness');
   assert.equal(productVerificationScope(full).confirmedTechnicalCount, 1);
 });
 
@@ -211,11 +223,11 @@ test('requirements filter needs all extracted technical checks, never a type-onl
   ]) assert.equal(hasConfirmedProductRequirements(excluded), false);
 });
 
-test('combined filter accepts a read in-stock card only when all extracted checks and public fields are present', () => {
-  const combined = { ...verified, match_status: 'matched', checks: verified.checks.map((check) => ({ ...check, status: 'matched' })), availability: 'InStock', image_url: 'https://supplier.example.test/product-photo.jpg', price: 12000, currency: 'KZT', stock_quantity: null };
+test('combined filter accepts only a quantity-bound server-ready offer with all published order evidence', () => {
+  const combined = readyLead(2);
   assert.equal(reportItemMatchesFilter(item([combined]), 'combined'), true);
-  assert.deepEqual(visibleProductLeads([candidate, combined], 'combined'), [combined]);
-  assert.equal(combined.stock_quantity, null, 'published availability does not invent sufficient order quantity');
+  assert.deepEqual(visibleProductLeads([candidate, combined], 'combined', 2, 'шт.'), [combined]);
+  assert.equal(canRecommendProductLead(combined, 2, 'шт.'), true);
 });
 
 test('combined filter rejects stock-only, partial-spec, unknown-certificate and incomplete-contact cards', () => {
@@ -236,7 +248,7 @@ test('combined filter rejects stock-only, partial-spec, unknown-certificate and 
 test('strict-offer gaps identify missing published fields without weakening confirmed technical checks', () => {
   const lead = { ...verified, match_status: 'matched', checks: verified.checks.map((check) => ({ ...check, status: 'matched' })), seller_phone: null, availability: null };
   const gaps = productConfirmationGaps(lead);
-  assert.deepEqual(gaps.map((gap) => gap.code), ['availability', 'photo', 'price', 'contact']);
+  for (const code of ['availability', 'photo', 'price', 'contact', 'readiness-missing', 'quantity', 'moq', 'variant', 'wholesale', 'price-basis']) assert.ok(gaps.some((gap) => gap.code === code));
   assert.equal(isConfirmedProductOffer(lead), false);
   assert.equal(hasConfirmedProductRequirements(lead), true);
 });
@@ -249,10 +261,10 @@ test('strict-offer gaps retain the actual unknown and mismatched requirements', 
   assert.equal(isConfirmedProductOffer(lead), false);
 });
 
-test('a confirmed published offer still explicitly declares unknown order quantity', () => {
+test('an otherwise complete published offer with unknown quantity remains a candidate', () => {
   const lead = { ...verified, match_status: 'matched', checks: verified.checks.map((check) => ({ ...check, status: 'matched' })), availability: 'InStock', image_url: 'https://supplier.example.test/product-photo.jpg', price: 12000, currency: 'KZT', stock_quantity: null };
-  assert.equal(isConfirmedProductOffer(lead), true);
-  assert.deepEqual(productConfirmationGaps(lead), []);
+  assert.equal(isConfirmedProductOffer(lead, 20, 'шт.'), false);
+  assert.ok(productConfirmationGaps(lead, 20, 'шт.').some((gap) => gap.code === 'quantity'));
   assert.match(productQuantityMessage(20, 'шт.', 'unknown'), /Количество по заказу \(20 шт\.\) не подтверждено/);
   assert.doesNotMatch(productQuantityMessage(20, 'шт.', 'unknown'), /Хватает|подтверждены/);
   assert.equal(productQuantityMessage(20, 'шт.', 'enough'), null);
@@ -290,4 +302,71 @@ test('CSV carries the saved per-item closure policy without inventing a global a
   const strict = productDiscoveryCsv('ДЕМО QA.pdf', [{ ...source, closure_policy: 'zipper_only' }]);
   assert.ok(strict.includes(CLOSURE_POLICY_LABELS.zipper_only));
   assert.equal(strict.includes(CLOSURE_POLICY_LABELS.allow_alternatives), false);
+});
+
+test('server readiness is bound to the current order, not globally to twenty or to any item', () => {
+  const lead = readyLead(20);
+  assert.equal(isConfirmedProductOffer(lead, 20, 'Штука'), true);
+  assert.equal(isConfirmedProductOffer(lead, 2, 'шт.'), false);
+  assert.equal(isConfirmedProductOffer(lead, 20, 'кг'), false);
+  assert.equal(isConfirmedProductOffer(lead, null, 'шт.'), false);
+  assert.equal(isConfirmedProductOffer({ ...lead, order_readiness: undefined }, 20, 'шт.'), false);
+  assert.equal(canRecommendProductLead({ ...lead, order_readiness: undefined }, 20, 'шт.'), false);
+  const kgLead = readyLead(15, 'кг');
+  assert.equal(isConfirmedProductOffer(kgLead, 15, 'килограмм'), true);
+  assert.equal(reportItemMatchesFilter({ ...item([lead]), quantity: 20 }, 'combined'), true);
+  assert.equal(reportItemMatchesFilter(item([lead]), 'combined'), false);
+});
+
+test('raw contradictions and missing MOQ, variant, wholesale or price basis defeat a stale ready flag', () => {
+  const lead = readyLead(20);
+  for (const invalid of [
+    { ...lead, stock_quantity: null }, { ...lead, stock_quantity: 19 }, { ...lead, stock_unit: 'ед.' },
+    { ...lead, min_order_quantity: null }, { ...lead, min_order_quantity: 21 }, { ...lead, min_order_unit: 'упаковка' },
+    { ...lead, variant_status: 'ambiguous' }, { ...lead, variant_status: undefined }, { ...lead, wholesale_terms: ' ' },
+    { ...lead, price_basis_status: 'unknown' }, { ...lead, price_quantity: null }, { ...lead, price_quantity: 0 }, { ...lead, price_quantity: 21 }, { ...lead, price_unit: 'упаковка' },
+    { ...lead, order_readiness: { ...lead.order_readiness, status: 'needs_confirmation' } },
+    { ...lead, order_readiness: { ...lead.order_readiness, gaps: [{ code: 'certificate', label: 'Документ не проверен' }] } },
+    { ...lead, order_readiness: { ...lead.order_readiness, quantity: { ...lead.order_readiness.quantity, status: 'unknown' } } },
+  ]) {
+    assert.equal(isConfirmedProductOffer(invalid, 20, 'шт.'), false);
+    assert.equal(canRecommendProductLead(invalid, 20, 'шт.'), false);
+  }
+  const canonicalUnknown = { ...lead, order_readiness: { ...lead.order_readiness, quantity: { ...lead.order_readiness.quantity, status: 'unknown', reason: 'ДЕМО QA — точное количество варианта неизвестно' } } };
+  assert.ok(productConfirmationGaps(canonicalUnknown, 20, 'шт.').some((gap) => gap.label === canonicalUnknown.order_readiness.quantity.reason));
+});
+
+test('seller GOST/certificate claims and unverified document links cannot become certificate validation', () => {
+  const lead = readyLead(20);
+  const certificate = { id: 'certificate', requirement: 'Сертификат соответствия ГОСТ', status: 'matched', evidence: 'Продавец написал: соответствует ГОСТ' };
+  const claimed = { ...lead, checks: [...lead.checks, certificate], certificate_status: 'document_linked', certificate_documents: [{ url: 'https://supplier.example.test/certificate.pdf', label: 'Документ источника', status: 'unverified' }] };
+  assert.equal(effectiveProductCheckStatus(certificate), 'unknown');
+  assert.equal(effectiveProductCheckStatus({ id: 'spec_3', requirement: 'Соответствие ГОСТ 123', status: 'matched' }), 'unknown');
+  assert.equal(isConfirmedProductOffer(claimed, 20, 'шт.'), false);
+  assert.ok(productConfirmationGaps(claimed, 20, 'шт.').some((gap) => gap.code === 'requirements-unknown'));
+  const csv = productDiscoveryCsv('ДЕМО QA.pdf', [{ ...item([claimed]), quantity: 20 }]);
+  assert.match(csv, /подлинность не проверена/);
+  assert.match(csv, /Требует подтверждения/);
+});
+
+test('CSV, selected cards and recommendation share the same quantity-aware readiness', () => {
+  const lead = readyLead(20);
+  const readyCsv = productDiscoveryCsv('ДЕМО QA.pdf', [{ ...item([lead]), quantity: 20 }]);
+  assert.match(readyCsv, /Готово к указанному заказу/);
+  const otherOrderCsv = productDiscoveryCsv('ДЕМО QA.pdf', [item([lead])]);
+  assert.doesNotMatch(otherOrderCsv, /Готово к указанному заказу/);
+  assert.match(otherOrderCsv, /другого количества или единицы/);
+  assert.deepEqual(visibleProductLeads([candidate, lead], 'combined', 20, 'шт.'), [lead]);
+  assert.deepEqual(visibleProductLeads([candidate, lead], 'combined', 2, 'шт.'), []);
+});
+
+test('quantity indicators use canonical variant-specific status and never legacy aggregate stock alone', () => {
+  const lead = readyLead(20);
+  assert.equal(orderQuantityAssessment(lead, 20, 'шт.').verdict, 'enough');
+  assert.equal(orderQuantityAssessment(lead, 2, 'шт.').verdict, 'unknown');
+  assert.equal(orderQuantityAssessment({ ...lead, order_readiness: undefined }, 20, 'шт.').verdict, 'unknown');
+  const ambiguous = { ...lead, order_readiness: { ...lead.order_readiness, quantity: { ...lead.order_readiness.quantity, status: 'unknown' } } };
+  assert.equal(orderQuantityAssessment(ambiguous, 20, 'шт.').verdict, 'unknown');
+  const shortage = { ...lead, stock_quantity: 15, order_readiness: { ...lead.order_readiness, status: 'not_suitable', quantity: { ...lead.order_readiness.quantity, status: 'shortage', stock_quantity: 15, missing: 5 } } };
+  assert.deepEqual(orderQuantityAssessment(shortage, 20, 'шт.'), { verdict: 'shortage', missing: 5 });
 });

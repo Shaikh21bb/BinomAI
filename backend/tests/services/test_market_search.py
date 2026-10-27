@@ -69,7 +69,8 @@ def test_query_variants_use_only_supplied_characteristics_and_stay_bounded():
     assert any("шерстяной" in query for query in variants)
     assert "шерстяной" in variants[0]
     assert "Жакет женский на молнии" in variants
-    assert "Жакет женский плотной вязки" in variants
+    assert "Жакет женский оптом" in variants
+    assert "Жакет женский оптовый поставщик" in variants
     assert "Жакет женский в наличии" in variants
     assert not any("шерстяной" in query and "вязки" in query for query in variants)
     assert not any("2100" in query or "дом40" in query or "Philips" in query for query in variants)
@@ -86,8 +87,40 @@ def test_query_slots_preserve_availability_and_type_when_many_characteristics_ex
     assert variants[-2:] == ["Жакет женский в наличии", "Жакет женский"]
     assert "Жакет женский шерсть" in variants
     assert "Жакет женский на молнии" in variants
-    assert "Жакет женский плотной вязки" in variants
-    assert "Жакет женский Трикотаж".casefold() in {query.casefold() for query in variants}
+    assert "Жакет женский оптом" in variants
+    assert "Жакет женский оптовый поставщик" in variants
+
+
+@pytest.mark.parametrize("name,specs,quantity,unit,qualifier", [
+    ("Средство для мытья посуды", "Объём: 500 мл; ГОСТ 32478-2013", 36, "шт.", "ГОСТ 32478-2013"),
+    ("Пылесос Philips FC9734/01", "Мощность: 2100 Вт; Объём: 2 л", 20, "штук", "2100 вт"),
+    ("Труба стальная", "Материал: оцинкованная сталь; ГОСТ 3262-75", "1.5", "т", "ГОСТ 3262-75"),
+])
+def test_wholesale_query_variants_are_generic_and_grounded_in_each_requested_volume(name, specs, quantity, unit, qualifier):
+    variants = _search_queries(name, specs, quantity=quantity, unit=unit)
+    assert len(variants) <= 6
+    assert len(variants) == len(set(value.casefold() for value in variants))
+    assert any("оптом" in value and f"{quantity} {unit}" in value for value in variants)
+    assert any("оптовый поставщик" in value for value in variants)
+    assert any(qualifier.casefold() in value.casefold() for value in variants)
+    assert any(value == _primary_query(name) for value in variants)
+    assert not any("https://" in value or "site:" in value for value in variants)
+
+
+@pytest.mark.parametrize("quantity,unit", [
+    (None, "шт"), (0, "шт"), (-1, "шт"), (float("nan"), "шт"), (float("inf"), "шт"),
+    (True, "шт"), (20, None), (20, ""), (20, "шт site:example.kz"),
+])
+def test_invalid_or_unknown_order_volume_is_not_fabricated_in_wholesale_queries(quantity, unit):
+    variants = _search_queries("Мыло жидкое", quantity=quantity, unit=unit)
+    assert "Мыло жидкое оптом" in variants
+    assert not any("20" in value or "None" in value or "nan" in value for value in variants)
+
+
+def test_twenty_is_not_a_global_wholesale_order_quantity():
+    assert "Мыло жидкое оптом 7 упак." in _search_queries("Мыло жидкое", quantity=7, unit="упак.")
+    assert "Мыло жидкое оптом 20 шт." in _search_queries("Мыло жидкое", quantity=20, unit="шт.")
+    assert not any("20" in value for value in _search_queries("Мыло жидкое"))
 
 
 @pytest.mark.parametrize("override", [
@@ -116,10 +149,91 @@ def test_instock_early_stop_accepts_current_phone_list_but_not_type_only_confirm
     assert _complete_in_stock([row], _requirements("Жакет женский", None)) == 0
 
 
+@pytest.mark.parametrize("override", [
+    {"stock_quantity": None}, {"stock_quantity": 19}, {"stock_unit": None}, {"stock_unit": "упак."},
+    {"stock_unit": "ед."}, {"min_order_quantity": None}, {"min_order_quantity": 21},
+    {"min_order_unit": None}, {"min_order_unit": "упак."},
+])
+def test_known_order_volume_cannot_stop_search_on_unknown_stock_or_incompatible_minimum(override):
+    row = {"title": "Мыло жидкое", "url": "https://shop.example.kz/product/soap", "is_product_page": True,
+           "page_verified": True, "availability": "InStock", "image_url": "https://images.example.kz/soap.jpg",
+           "price": 500, "currency": "KZT", "seller_phone": "+77001112233", "stock_quantity": 20,
+           "stock_unit": "шт.", "min_order_quantity": 1, "min_order_unit": "шт.",
+           "evidence_text": "Мыло жидкое 500 мл\nОбъём: 500 мл"}
+    requirements = _requirements("Мыло жидкое", "Объём: 500 мл")
+    assert _complete_in_stock([row], requirements, quantity=20, unit="штук") == 1
+    assert _complete_in_stock([{**row, **override}], requirements, quantity=20, unit="штук") == 0
+
+
+@pytest.mark.asyncio
+async def test_known_order_keeps_searching_after_retail_instock_until_published_batch_is_sufficient(monkeypatch):
+    from app.core.config import settings
+    from app.services import market_search
+
+    queries = []
+
+    async def search(query, *_args):
+        queries.append(query)
+        prefix = "retail" if len(queries) == 1 else "batch"
+        return [{"title": "Мыло жидкое", "url": f"https://shop.example.kz/product/{prefix}-{n}"} for n in range(3)]
+
+    async def enrich(rows):
+        return [{**row, "is_product_page": True, "page_verified": True, "availability": "InStock",
+                 "image_url": "https://images.example.kz/soap.jpg", "price": 500, "currency": "KZT",
+                 "seller_phone": "+77001112233", "stock_quantity": None if "retail" in row["url"] else 20,
+                 "stock_unit": "шт.", "min_order_quantity": 1, "min_order_unit": "шт.",
+                 "evidence_text": "Мыло жидкое 500 мл\nОбъём: 500 мл"} for row in rows]
+
+    async def forbidden_fallback(*_args):
+        pytest.fail("Sufficient batch evidence should stop further requests")
+
+    monkeypatch.setattr(settings, "GOOGLE_CSE_API_KEY", None)
+    monkeypatch.setattr(market_search, "_duckduckgo", search)
+    monkeypatch.setattr(market_search, "enrich_product_pages", enrich)
+    monkeypatch.setattr(market_search, "_satu_search", forbidden_fallback)
+    rows = await search_products("Мыло жидкое", specs="Объём: 500 мл", quantity=20, unit="шт.")
+    assert len(queries) == 2
+    assert any("оптом 20 шт." in query for query in queries)
+    assert _complete_in_stock(rows, _requirements("Мыло жидкое", "Объём: 500 мл"), quantity=20, unit="шт.") == 3
+
+
+@pytest.mark.asyncio
+async def test_late_sufficient_batch_is_not_discarded_by_twelve_card_cap_after_retail_results(monkeypatch):
+    from app.core.config import settings
+    from app.services import market_search
+
+    queries = []
+    expected = _search_queries("Мыло жидкое", "Объём: 500 мл", quantity=20, unit="шт.")
+
+    async def search(query, *_args):
+        queries.append(query)
+        return [{"title": "Мыло жидкое", "url": f"https://shop.example.kz/product/{len(queries)}-{n}"} for n in range(8)]
+
+    async def enrich(rows):
+        return [{**row, "is_product_page": True, "page_verified": True, "availability": "InStock",
+                 "image_url": "https://images.example.kz/soap.jpg", "price": 500, "currency": "KZT",
+                 "seller_phone": "+77001112233", "stock_quantity": 20 if len(queries) == len(expected) else None,
+                 "stock_unit": "шт.", "min_order_quantity": 1, "min_order_unit": "шт.",
+                 "evidence_text": "Мыло жидкое 500 мл\nОбъём: 500 мл"} for row in rows]
+
+    async def forbidden_fallback(*_args):
+        pytest.fail("Late sufficient batches should stop further source requests")
+
+    monkeypatch.setattr(settings, "GOOGLE_CSE_API_KEY", None)
+    monkeypatch.setattr(market_search, "_duckduckgo", search)
+    monkeypatch.setattr(market_search, "enrich_product_pages", enrich)
+    monkeypatch.setattr(market_search, "_satu_search", forbidden_fallback)
+    rows = await search_products("Мыло жидкое", specs="Объём: 500 мл", quantity=20, unit="шт.")
+    assert queries == expected
+    assert len(rows) == 12
+    assert all(row["stock_quantity"] == 20 for row in rows[:3])
+    assert _complete_in_stock(rows, _requirements("Мыло жидкое", "Объём: 500 мл"), quantity=20, unit="шт.") >= 3
+
+
 @pytest.mark.parametrize("evidence", [
-    "Жакет женский\nМатериал: хлопок\nГОСТ 25295-2003",
+    "Жакет женский\nМатериал: хлопок\nДлина: 80 см",
     "Жакет женский\nМатериал: шерсть",
-    "Жакет\nМатериал: шерсть\nГОСТ 25295-2003",
+    "Жакет\nМатериал: шерсть\nДлина: 80 см",
 ])
 @pytest.mark.asyncio
 async def test_three_commercially_complete_instock_cards_do_not_stop_with_unproven_requirements(monkeypatch, evidence):
@@ -140,7 +254,7 @@ async def test_three_commercially_complete_instock_cards_do_not_stop_with_unprov
     async def enrich(rows):
         return [{**row, "is_product_page": True, "page_verified": True, "availability": "InStock",
                  "image_url": "https://images.example.kz/jacket.jpg", "price": 50000, "currency": "KZT", "seller_phone": "+77001112233",
-                 "evidence_text": evidence if "wrong" in row["url"] else "Жакет женский\nМатериал: шерсть\nГОСТ 25295-2003"} for row in rows]
+                 "evidence_text": evidence if "wrong" in row["url"] else "Жакет женский\nМатериал: шерсть\nДлина: 80 см"} for row in rows]
 
     forbidden_http = Mock(side_effect=AssertionError("Discovery must not create an HTTP client for technical checks"))
 
@@ -150,7 +264,7 @@ async def test_three_commercially_complete_instock_cards_do_not_stop_with_unprov
     monkeypatch.setattr(market_search, "_duckduckgo", search)
     monkeypatch.setattr(market_search, "enrich_product_pages", enrich)
     monkeypatch.setattr(httpx, "AsyncClient", forbidden_http)
-    rows = await search_products("Жакет женский", specs="Материал: шерсть; ГОСТ 25295-2003")
+    rows = await search_products("Жакет женский", specs="Материал: шерсть; Длина: 80 см")
 
     assert len(queries) == 2
     assert all("matched" in row["url"] for row in rows[:3])

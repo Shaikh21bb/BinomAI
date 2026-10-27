@@ -282,7 +282,7 @@ async def test_quick_parse_rejects_non_pdf(authenticated_user):
 async def test_quick_search_returns_checked_cards(authenticated_user, monkeypatch):
     seen = []
 
-    async def search(query, *, specs=None):
+    async def search(query, *, specs=None, quantity=None, unit=None):
         seen.append((query, specs))
         return [{"url": "https://shop.example.kz/p/gel-500", "is_product_page": True}]
 
@@ -310,12 +310,13 @@ async def test_saved_search_updates_only_owned_report(authenticated_user, monkey
         id=uuid.uuid4(), company_id=user.company_id, created_by=user.id,
         filename="techspec.pdf", page_count=1, ocr_pages=0, total_items=1,
         truncated=False,
-        items=[{"product_name": "Средство для посуды 500 мл", "specs": "Жидкое", "state": "pending", "results": []}],
+        items=[{"product_name": "Средство для посуды 500 мл", "specs": "Жидкое", "quantity": 12, "unit": "шт", "state": "pending", "results": []}],
     )
     db.execute.return_value = scalar_first(report)
 
-    async def search(_, *, specs=None):
+    async def search(_, *, specs=None, quantity=None, unit=None):
         assert specs == "Жидкое"
+        assert (quantity, unit) == (12, "шт")
         return [{"url": "https://shop.example.kz/p/gel-500"}]
 
     async def evaluate(*_):
@@ -327,12 +328,14 @@ async def test_saved_search_updates_only_owned_report(authenticated_user, monkey
         response = await client.post(
             "/api/v1/quick-check/search",
             json={"product_name": "Средство для посуды 500 мл", "specs": "Подменённое клиентом ТЗ",
-                  "report_id": str(report.id), "item_index": 0},
+                  "report_id": str(report.id), "item_index": 0, "quantity": 1, "unit": "кг"},
         )
     assert response.status_code == 200
     assert report.items[0]["state"] == "ready"
     assert report.items[0]["checked_at"]
     assert report.items[0]["results"][0]["match_status"] == "matched"
+    assert report.items[0]["results"][0]["order_readiness"]["quantity"]["requested_quantity"] == 12
+    assert report.items[0]["results"][0]["order_readiness"]["quantity"]["requested_unit"] == "шт"
     assert db.execute.await_count == 2
     for call in db.execute.call_args_list:
         params = call.args[0].compile().params.values()
@@ -364,7 +367,7 @@ async def test_owned_closure_clarification_is_applied_and_saved_without_rewritin
     assert report.items[0]["closure_policy"] == "allow_alternatives"
     assert report.items[0]["specs"] == specs
     assert report.items[0]["product_name"] == "Жакет женский на замке"
-    assert search.await_args.kwargs == {"specs": specs, "closure_policy": "allow_alternatives"}
+    assert search.await_args.kwargs == {"specs": specs, "quantity": None, "unit": None, "closure_policy": "allow_alternatives"}
     assert evaluate.await_args.kwargs == {"closure_policy": "allow_alternatives"}
     assert db.execute.call_args_list[-1].args[0].get_execution_options()["populate_existing"] is True
     for call in db.execute.call_args_list:
@@ -394,6 +397,27 @@ def test_only_saved_report_reruns_preserve_user_clarifications_not_new_parses():
     assert "closure_policy" not in quick_check._fresh_items([item])[0]
     assert quick_check._fresh_items([item], preserve_clarifications=True)[0]["closure_policy"] == "allow_alternatives"
     assert "closure_policy" not in quick_check._fresh_items([{**item, "closure_policy": "ignore_gost"}], preserve_clarifications=True)[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", [{"quantity": 21}, {"unit": "упак"}])
+async def test_search_cannot_save_readiness_for_concurrently_changed_order(authenticated_user, monkeypatch, change):
+    user, db = authenticated_user
+    report = QuickCheckReport(id=uuid.uuid4(), company_id=user.company_id, created_by=user.id,
+        filename="spec.pdf", page_count=1, ocr_pages=0, total_items=1, truncated=False,
+        processing_state="completed", items=[{"product_name": "Кабель ВВГ", "specs": "Медь", "quantity": 20, "unit": "м", "state": "ready", "results": []}])
+    db.execute.return_value = scalar_first(report)
+    async def concurrently_changed(*args, **kwargs):
+        report.items = [{**report.items[0], **change}]
+        return []
+    monkeypatch.setattr(quick_check, "search_products", concurrently_changed)
+    monkeypatch.setattr(quick_check, "evaluate_product_leads", AsyncMock(return_value=[]))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/quick-check/search", json={
+            "product_name": "Кабель ВВГ", "report_id": str(report.id), "item_index": 0})
+    assert response.status_code == 409
+    assert report.items[0][next(iter(change))] == next(iter(change.values()))
+    assert report.items[0]["results"] == []
 
 
 @pytest.mark.asyncio

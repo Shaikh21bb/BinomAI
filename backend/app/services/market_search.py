@@ -2,6 +2,7 @@ import re
 import asyncio
 import html
 import math
+from decimal import Decimal, InvalidOperation
 from html.parser import HTMLParser
 import structlog
 import httpx
@@ -12,6 +13,7 @@ from app.core.config import settings
 from app.services.product_identity import contains_model, model_identifiers
 from app.services.product_matching import _compare_locally, _requirements, _type_check
 from app.services.product_pages import _IMAGE_NOISE, fetch_product_page, is_public_url, looks_like_product_url
+from app.services.product_readiness import assess_order_quantity, has_required_certificate_evidence
 
 logger = structlog.get_logger(__name__)
 
@@ -49,12 +51,30 @@ def _primary_query(query: str) -> str:
     return short if len(short.split()) >= 2 else query
 
 
-def _search_queries(query: str, specs: str | None = None) -> list[str]:
+def _query_quantity(quantity: float | str | None, unit: str | None) -> str:
+    """Use the requested volume only; never turn an unknown unit into pieces."""
+    if isinstance(quantity, bool) or not isinstance(unit, str):
+        return ""
+    label = " ".join(unit.split())
+    if not re.fullmatch(r"[a-zа-яёәғқңөұүһі0-9²³ .-]{1,24}", label, re.I):
+        return ""
+    try:
+        number = Decimal(str(quantity).replace(",", "."))
+        if not number.is_finite() or not 0 < number <= Decimal("1e12"):
+            return ""
+    except InvalidOperation:
+        return ""
+    value = format(number, "f")
+    return f"{value.rstrip('0').rstrip('.') if '.' in value else value} {label}"
+
+
+def _search_queries(query: str, specs: str | None = None, *, quantity: float | str | None = None, unit: str | None = None) -> list[str]:
     """Use only supplied product characteristics; never invent brands or equivalents."""
     primary = _primary_query(query)
     supplied = " ".join([query, specs or ""])
     supplied = re.split(r"(?:Место|Срок|Адрес|Условия)\s+поставки\s*:", supplied, maxsplit=1, flags=re.I)[0]
-    materials = re.findall(r"\bшерст\w*", supplied, re.I)
+    materials = re.findall(r"\b(?:материал|состав)\s*[:—-]\s*([^\n;.]{2,60})", supplied, re.I)
+    materials += re.findall(r"\bшерст\w*", supplied, re.I)
     fasteners = re.findall(r"\bна\s+(?:молнии|замке)\b", supplied, re.I)
     # These two phrases describe the same fastening, not an invented alternative
     # material/brand. Separate queries avoid requiring every tender word in SEO.
@@ -63,18 +83,23 @@ def _search_queries(query: str, specs: str | None = None) -> list[str]:
         zipper = ["на замке"]
     construction = re.findall(r"(?:плотн\w*\s+)?вязк\w*|трикотаж\w*", supplied, re.I)
     measurements = re.findall(
-        r"(?<![a-z0-9])\d+(?:[,.]\d+)?\s*(?:мл|кг|мм|см|кВт|Вт|литр\w*|дюйм\w*)(?!\w)",
+        r"(?<![a-z0-9])\d+(?:[,.]\d+)?\s*(?:мл|кг|гр|г|мм|см|м[2²3³]?|т|л|кВт|Вт|литр\w*|дюйм\w*)(?!\w)",
         supplied, re.I,
     )
+    standards = re.findall(r"\b(?:СТ\s+РК\s+)?ГОСТ\s+(?:[А-ЯA-Z]\s+)?\d+(?:-\d+)*|\bСТ\s+РК\s+\d+(?:-\d+)*", supplied, re.I)
     qualifiers = list(dict.fromkeys(value.casefold() for value in [
         *materials, *zipper, *construction, *measurements, *fasteners,
     ]))
-    # Reserve both an availability-intent query and the broad type. A long full
-    # name must not consume the slot needed for an independent characteristic.
+    # Reserve independent wholesale intent, availability and the broad type for
+    # every product category; technical matching still checks all requirements.
     focused = [f"{primary} {value}" for value in qualifiers if value not in primary.casefold()]
-    options = focused[:_MAX_QUERY_VARIANTS - 2] + [f"{primary} в наличии", primary]
+    if standards:
+        focused = focused[:1] + [f"{primary} {standards[0]}"]
+    wholesale_volume = _query_quantity(quantity, unit)
+    wholesale = [f"{primary} оптом" + (f" {wholesale_volume}" if wholesale_volume else ""), f"{primary} оптовый поставщик"]
+    options = focused[:_MAX_QUERY_VARIANTS - 4] + wholesale + [f"{primary} в наличии", primary]
     if not specs:
-        options = [primary, *focused[:_MAX_QUERY_VARIANTS - 2], f"{primary} в наличии"]
+        options = [primary, *focused[:_MAX_QUERY_VARIANTS - 4], *wholesale, f"{primary} в наличии"]
     unique: dict[str, str] = {}
     for option in options:
         value = " ".join(option.split())[:150]
@@ -103,7 +128,7 @@ def _local_requirement_states(row: Dict[str, Any], requirements: List[Dict[str, 
     ]
 
 
-def _technical_quality(row: Dict[str, Any], requirements: List[Dict[str, str]]) -> tuple:
+def _technical_quality(row: Dict[str, Any], requirements: List[Dict[str, str]], *, quantity: float | str | None = None, unit: str | None = None) -> tuple:
     states = _local_requirement_states(row, requirements)
     if not states:
         rank = -1
@@ -113,7 +138,10 @@ def _technical_quality(row: Dict[str, Any], requirements: List[Dict[str, str]]) 
         rank = 1
     else:
         rank = 3 if all(state == "matched" for state in states) else 2
-    return rank, _result_quality(row), states.count("matched")
+    volume_rank = 1
+    if quantity is not None:
+        volume_rank = {"enough": 2, "unknown": 1, "shortage": 0}.get(assess_order_quantity(row, quantity, unit).get("status"), 1)
+    return rank, volume_rank, _result_quality(row), states.count("matched")
 
 
 def _positive_number(value: Any) -> bool:
@@ -141,12 +169,14 @@ def _commercially_complete_in_stock(row: Dict[str, Any]) -> bool:
     )
 
 
-def _complete_in_stock(results: List[Dict[str, Any]], requirements: List[Dict[str, str]]) -> int:
+def _complete_in_stock(results: List[Dict[str, Any]], requirements: List[Dict[str, str]], *, quantity: float | str | None = None, unit: str | None = None) -> int:
     if len(requirements) < 2:
         # A confirmed type alone is not technical compliance with a tender.
         return 0
     return sum(
         bool(_commercially_complete_in_stock(row)
+             and (quantity is None or assess_order_quantity(row, quantity, unit).get("status") == "enough")
+             and has_required_certificate_evidence(row, requirements)
              and (states := _local_requirement_states(row, requirements))
              and all(state == "matched" for state in states))
         for row in results
@@ -169,7 +199,7 @@ MARKETPLACES = [
 ]
 
 
-async def search_products(query: str, region: Optional[str] = None, *, specs: str | None = None, closure_policy: str | None = None) -> List[Dict[str, Any]]:
+async def search_products(query: str, region: Optional[str] = None, *, specs: str | None = None, closure_policy: str | None = None, quantity: float | str | None = None, unit: str | None = None) -> List[Dict[str, Any]]:
     """
     Search the web for a product by name + specs, optionally scoped to a region.
     Priority: Google CSE (if configured) -> DuckDuckGo -> marketplace links fallback.
@@ -177,7 +207,7 @@ async def search_products(query: str, region: Optional[str] = None, *, specs: st
     """
     results: List[Dict[str, Any]] = []
     visited: set[tuple] = set()
-    queries = _search_queries(query, specs)
+    queries = _search_queries(query, specs, quantity=quantity, unit=unit)
     requirements = _requirements(query, specs, closure_policy=closure_policy) if closure_policy is not None else _requirements(query, specs)
     primary_query = queries[0]
 
@@ -212,7 +242,7 @@ async def search_products(query: str, region: Optional[str] = None, *, specs: st
         logger.warning("google_cse_search_failed", error=str(e)[:200])
 
     for index, search_query in enumerate(queries):
-        if _complete_in_stock(results, requirements) >= _COMPLETE_IN_STOCK_TARGET or len(visited) >= _MAX_PAGE_READS:
+        if _complete_in_stock(results, requirements, quantity=quantity, unit=unit) >= _COMPLETE_IN_STOCK_TARGET or len(visited) >= _MAX_PAGE_READS:
             break
         try:
             await consume(await _duckduckgo(search_query, region), len(queries) - index + 1)
@@ -222,8 +252,8 @@ async def search_products(query: str, region: Optional[str] = None, *, specs: st
     # Long tender prose can make generic web search return categories. A short
     # marketplace product-page query gives concrete items to inspect.
     try:
-        if _complete_in_stock(results, requirements) >= _COMPLETE_IN_STOCK_TARGET or len(visited) >= _MAX_PAGE_READS:
-            return sorted(results, key=lambda row: _technical_quality(row, requirements), reverse=True)[:12]
+        if _complete_in_stock(results, requirements, quantity=quantity, unit=unit) >= _COMPLETE_IN_STOCK_TARGET or len(visited) >= _MAX_PAGE_READS:
+            return sorted(results, key=lambda row: _technical_quality(row, requirements, quantity=quantity, unit=unit), reverse=True)[:12]
         marketplace_query = re.sub(r"моющее средство для посуды", "средство для мытья посуды", primary_query, flags=re.I)
         short_query = marketplace_query.split(";")[0][:85]
         targeted_batches = await asyncio.gather(
@@ -244,7 +274,7 @@ async def search_products(query: str, region: Optional[str] = None, *, specs: st
         logger.warning("targeted_product_search_failed", error_type=type(e).__name__)
 
     # Search pages remain discoverable links, not concrete product cards.
-    results = sorted(results, key=lambda row: _technical_quality(row, requirements), reverse=True)
+    results = sorted(results, key=lambda row: _technical_quality(row, requirements, quantity=quantity, unit=unit), reverse=True)
     return results[:12] if any(row.get("is_product_page") for row in results) else results[:10] + _marketplace_links(query, region)
 
 

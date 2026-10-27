@@ -48,8 +48,10 @@ def make_item(*, item_id=ITEM_ID, verified: bool = True, price=1250):
             "title": "Кабель ВВГнг-LS 3×2,5",
             "shop": "Vendor KZ",
             "price": price,
+            "price_basis_status": "published", "price_quantity": 1, "price_unit": "м",
             "currency": "₸",
             "stock_quantity": 120,
+            "stock_unit": "м",
             "characteristics": {"Сечение": "3×2,5 мм²"},
             "is_product_page": True,
             "page_verified": verified,
@@ -115,6 +117,35 @@ async def test_create_offer_from_verified_discovery_card():
     assert "Сечение 3×2,5 мм²: подтверждено" in offer.compliance_notes
     db.add.assert_called_once_with(offer)
     db.flush.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_discovered_price_basis_is_preserved_not_invented_from_tender_unit():
+    item = make_item()
+    item.results[0].update(price_quantity=5, price_unit="м", min_order_quantity=10, min_order_unit="м", stock_unit="упак")
+    db = make_db(make_project(), item, None)
+    user = User(id=USER_ID, company_id=COMPANY_ID, role="admin")
+    offer = await create_offer_from_discovery(PROJECT_ID, ITEM_ID, DiscoveryOfferCreate(source_url=SOURCE_URL), db, user)
+    assert offer.price_quantity == Decimal("5")
+    assert offer.original_unit == "м"
+    assert offer.available_quantity is None
+    assert offer.moq == Decimal("10")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changes", [
+    {"price_basis_status": "unknown"}, {"price_quantity": None}, {"price_unit": None},
+    {"price_quantity": float("nan")}, {"price_unit": "ед."}, {"currency": None},
+])
+async def test_discovery_cannot_invent_per_piece_price_or_currency(changes):
+    item = make_item()
+    item.results[0].update(changes)
+    db = make_db(make_project(), item, None)
+    user = User(id=USER_ID, company_id=COMPANY_ID, role="admin")
+    with pytest.raises(HTTPException) as error:
+        await create_offer_from_discovery(PROJECT_ID, ITEM_ID, DiscoveryOfferCreate(source_url=SOURCE_URL), db, user)
+    assert error.value.status_code == 422
+    db.add.assert_not_called()
 
 
 @pytest.mark.asyncio
